@@ -1,0 +1,9 @@
+# AIO Server framework (not our code)
+AIO_Server/
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
