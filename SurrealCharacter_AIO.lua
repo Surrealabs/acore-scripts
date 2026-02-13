@@ -6,8 +6,8 @@
 -- (works from hardware‑event handlers in WoTLK 3.3.5) so drag‑and‑drop,
 -- click‑to‑equip, and click‑to‑unequip all work exactly like the default UI.
 --
--- Stats panel integrates the SurrealStats renamed‑rating display with a
--- dropdown for Base Stats / Melee / Ranged / Spell / Defenses.
+-- Stats panel has its own renamed-rating display with a dropdown for
+-- Base Stats / Melee / Ranged / Spell / Defenses.
 --
 -- Equipment Manager support: save / load / delete gear sets using the
 -- built‑in 3.3.5 equipment‑set API.
@@ -231,6 +231,51 @@ else
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", -2, -2)
     closeBtn:SetScript("OnClick", function() frame:Hide() end)
+
+    -- Army button (opens the bot army panel)
+    local armyBtn = CreateFrame("Button", nil, frame)
+    armyBtn:SetSize(80, 22)
+    armyBtn:SetPoint("TOPRIGHT", closeBtn, "TOPLEFT", -4, -4)
+    armyBtn:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+    armyBtn:SetBackdropColor(0.12, 0.10, 0.20, 0.9)
+    armyBtn:SetBackdropBorderColor(0.35, 0.30, 0.50, 1)
+
+    local armyIcon = armyBtn:CreateTexture(nil, "ARTWORK")
+    armyIcon:SetSize(16, 16)
+    armyIcon:SetPoint("LEFT", armyBtn, "LEFT", 4, 0)
+    armyIcon:SetTexture("Interface\\Icons\\Achievement_General_StayClassy")
+
+    local armyLabel = armyBtn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    armyLabel:SetPoint("LEFT", armyIcon, "RIGHT", 4, 0)
+    armyLabel:SetText("|cffffd700Army|r")
+
+    armyBtn:SetScript("OnClick", function()
+        if SurrealArmyFrame then
+            if SurrealArmyFrame:IsShown() then
+                SurrealArmyFrame:Hide()
+            else
+                SurrealArmyFrame:Show()
+            end
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[SurrealUI]|r Army panel not loaded.")
+        end
+    end)
+    armyBtn:SetScript("OnEnter", function()
+        armyBtn:SetBackdropColor(0.20, 0.15, 0.30, 1)
+        GameTooltip:SetOwner(armyBtn, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Bot Army", 1, 0.82, 0)
+        GameTooltip:AddLine("Manage your bot companions", 0.8, 0.8, 0.8)
+        GameTooltip:Show()
+    end)
+    armyBtn:SetScript("OnLeave", function()
+        armyBtn:SetBackdropColor(0.12, 0.10, 0.20, 0.9)
+        GameTooltip:Hide()
+    end)
 
     -- Player info line
     local nameText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -801,22 +846,43 @@ else
             local b, p, n = UnitAttackPower("player")
             b = b or 0; p = p or 0; n = n or 0
             local ap = b + p + n
+            local minD, maxD, minOffD, maxOffD = UnitDamage("player")
+            local mainSpeed, offSpeed = UnitAttackSpeed("player")
+            minD = minD or 0; maxD = maxD or 0
+            minOffD = minOffD or 0; maxOffD = maxOffD or 0
+            mainSpeed = mainSpeed or 0; offSpeed = offSpeed or 0
             rows[1].label:SetText("Attack Power:")
             rows[1].value:SetText(ap)
             rows[1].value:SetTextColor(1,1,1)
             rows[1].tipTitle = format("Attack Power: %d", ap)
-            rows[1].tipText  = format("%.1f DPS Increase", ap / 14)
+            local tip = format("%.1f DPS Increase", ap / 14)
+            if mainSpeed > 0 then
+                local mainDps = ((minD + maxD) / 2) / mainSpeed
+                tip = tip .. format("\nMain Hand: %.0f - %.0f (%.2fs, %.1f DPS)", minD, maxD, mainSpeed, mainDps)
+            end
+            if offSpeed > 0 and (maxOffD > 0 or minOffD > 0) then
+                local offDps = ((minOffD + maxOffD) / 2) / offSpeed
+                tip = tip .. format("\nOff Hand: %.0f - %.0f (%.2fs, %.1f DPS)", minOffD, maxOffD, offSpeed, offDps)
+            end
+            rows[1].tipText = tip
             SetSecondaryStats(rows, 2)
 
         elseif cat == "Ranged" then
             local b, p, n = UnitRangedAttackPower("player")
             b = b or 0; p = p or 0; n = n or 0
             local rap = b + p + n
+            local rSpeed, rMin, rMax = UnitRangedDamage("player")
+            rSpeed = rSpeed or 0; rMin = rMin or 0; rMax = rMax or 0
             rows[1].label:SetText("Ranged AP:")
             rows[1].value:SetText(rap)
             rows[1].value:SetTextColor(1,1,1)
             rows[1].tipTitle = format("Ranged Attack Power: %d", rap)
-            rows[1].tipText  = format("%.1f DPS Increase", rap / 14)
+            local tip = format("%.1f DPS Increase", rap / 14)
+            if rSpeed > 0 then
+                local rangedDps = ((rMin + rMax) / 2) / rSpeed
+                tip = tip .. format("\nRanged: %.0f - %.0f (%.2fs, %.1f DPS)", rMin, rMax, rSpeed, rangedDps)
+            end
+            rows[1].tipText = tip
             SetSecondaryStats(rows, 2)
 
         elseif cat == "Spell" then
@@ -994,6 +1060,9 @@ else
         end
         if CharacterFrame and CharacterFrame:IsShown() then
             CharacterFrame:Hide()
+        end
+        if SurrealArmyFrame and SurrealArmyFrame:IsShown() then
+            SurrealArmyFrame:Hide()
         end
 
         model:SetUnit("player")

@@ -2,132 +2,488 @@
 -- SurrealTalentFrame_AIO.lua
 --
 -- Replaces the default WoTLK talent frame with a modern, wider layout.
--- Each talent's grid position is configurable per class / spec.
--- Row requirements have been removed server-side (see mod-talents-expanded).
+-- Talent grid positions are read directly from the DBC (TierID / ColumnIndex).
+-- Use the Talent Layout Editor (web) to visually arrange talents and save
+-- positions back into Talent.dbc.
 --
 -- Usage:
 --   Press N to open the talent frame (same binding as default)
---   /surrealtalents debug  — prints all talent indices for layout config
+--   /surrealtalents debug  — prints all talent indices & DBC grid positions
 --
 -- Configuration:
---   1. Edit TALENT_LAYOUTS to reposition any talent (per class, per spec tab).
---   2. Edit CFG for grid dimensions, button size, spacing, and colours.
+--   Edit CFG for grid dimensions, button size, spacing, and colours.
 -------------------------------------------------------------------------------
 
 local AIO = AIO or require("AIO")
 
 if AIO.AddAddon() then
     ---------------------------------------------------------------------------
-    -- SERVER SIDE — Talent reset handler via AIO
+    -- SERVER SIDE
+    -- Server logic has been moved to SurrealTalentServer_AIO.lua.
+    -- This block is intentionally empty — AIO.AddAddon() returns true on
+    -- the server, so the client-side code below won't run there.
     ---------------------------------------------------------------------------
-    local Handlers = AIO.AddHandlers("SurrealTalents", {})
 
-    -- Client requests the current reset cost
-    function Handlers.GetResetCost(player)
-        local cost = player:ResetTalentsCost()
-        AIO.Handle(player, "SurrealTalents", "ShowResetCost", cost)
-    end
-
-    -- Client confirms the talent reset
-    function Handlers.ConfirmReset(player)
-        local cost = player:ResetTalentsCost()
-        if player:GetCoinage() < cost then
-            player:SendBroadcastMessage("Not enough gold to reset talents.")
-            return
-        end
-        if player:ResetTalents(false) then
-            player:SendBroadcastMessage("Talents have been reset.")
-            -- Send updated cost for next time
-            local newCost = player:ResetTalentsCost()
-            AIO.Handle(player, "SurrealTalents", "ResetDone", newCost)
-        else
-            player:SendBroadcastMessage("No talents to reset.")
-        end
-    end
-
-    -- Client requests to apply a glyph from bags
-    -- itemID = glyph item entry, socketIdx = 0-5 (slot index)
-    function Handlers.ApplyGlyph(player, itemID, socketIdx)
-        -- Validate socket index
-        if type(socketIdx) ~= "number" or socketIdx < 0 or socketIdx > 5 then
-            player:SendBroadcastMessage("Invalid glyph slot.")
-            return
-        end
-
-        -- Check player has the item
-        if not player:HasItem(itemID, 1, false) then
-            player:SendBroadcastMessage("You don't have that glyph.")
-            return
-        end
-
-        -- Get the item to read its spell
-        local item = player:GetItemByEntry(itemID)
-        if not item then
-            player:SendBroadcastMessage("Could not find glyph item.")
-            return
-        end
-
-        -- Get the glyph application spell from the item (spellid_1 = index 0)
-        local glyphSpellId = item:GetSpellId(0)
-        if not glyphSpellId or glyphSpellId == 0 then
-            player:SendBroadcastMessage("Invalid glyph item.")
-            return
-        end
-
-        -- Get the GlyphProperties ID from the spell's MiscValue
-        local spellInfo = GetSpellInfo(glyphSpellId)
-        if not spellInfo then
-            player:SendBroadcastMessage("Invalid glyph spell.")
-            return
-        end
-
-        local glyphPropsId = spellInfo:GetEffectMiscValueA(0)
-        if not glyphPropsId or glyphPropsId == 0 then
-            player:SendBroadcastMessage("Could not resolve glyph properties.")
-            return
-        end
-
-        -- Apply the new glyph (SetGlyph handles replacing old glyph data)
-        player:SetGlyph(glyphPropsId, socketIdx)
-
-        -- Cast the glyph application spell to apply the passive aura
-        -- This spell has SPELL_EFFECT_APPLY_GLYPH which handles aura
-        player:CastSpell(player, glyphSpellId, true)
-
-        -- Consume the glyph item
-        player:RemoveItem(itemID, 1)
-
-        -- Notify client
-        AIO.Handle(player, "SurrealTalents", "GlyphApplied", socketIdx)
-        player:SendBroadcastMessage("Glyph applied successfully.")
-    end
-
-    -- Client requests to remove a glyph
-    function Handlers.RemoveGlyph(player, socketIdx)
-        if type(socketIdx) ~= "number" or socketIdx < 0 or socketIdx > 5 then
-            player:SendBroadcastMessage("Invalid glyph slot.")
-            return
-        end
-
-        local oldGlyphId = player:GetGlyph(socketIdx)
-        if not oldGlyphId or oldGlyphId == 0 then
-            player:SendBroadcastMessage("No glyph in that slot.")
-            return
-        end
-
-        -- Clear the glyph slot
-        player:SetGlyph(0, socketIdx)
-
-        -- Send talent update to refresh client glyph data
-        player:SendTalentsInfoData(false)
-
-        AIO.Handle(player, "SurrealTalents", "GlyphApplied", socketIdx)
-        player:SendBroadcastMessage("Glyph removed.")
-    end
 else
     ---------------------------------------------------------------------------
     -- CLIENT SIDE
     ---------------------------------------------------------------------------
+
+    -- =================================================================
+    --  C U S T O M   T A L E N T   D A T A   L A Y E R
+    --
+    --  Replaces WoW's native talent API (GetTalentInfo, LearnTalent, etc.)
+    --  with versions backed by SURREAL_TALENT_TREES (shared config) and
+    --  server-pushed player state.  All existing UI code continues to work
+    --  by calling these local functions instead of the global WoW APIs.
+    -- =================================================================
+
+    local BlizzardGetUnspentTalentPoints = _G.GetUnspentTalentPoints
+    local BlizzardLearnTalent = _G.LearnTalent
+    local BlizzardIsSpellKnown = _G.IsSpellKnown or _G.IsPlayerSpell
+    local TALENT_DEBUG = false
+
+    local function DebugTalent(msg)
+        if TALENT_DEBUG and DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff7dd3fc[SurrealTalents]|r " .. tostring(msg))
+        end
+    end
+
+    -- The server sends us talent state via AIO; we store it here.
+    local ST_playerTalents   = {}   -- {talentId = rank}
+    local ST_spent           = 0
+    local ST_maxPoints       = 0
+    local ST_unspent         = 0
+    local ST_tabPointInfo    = {}   -- {[tabIdx] = {name=, points=}}
+    local ST_previewPoints   = {}   -- {talentId = delta} (preview mode)
+    local ST_previewSpent    = 0
+    local ST_dataReady       = false
+    local ST_waitingForServer = false
+    local ST_waitReason = nil
+
+    -- Build ordered talent lists from tree config (sorted by row, col)
+    -- These are indexed by [tabIdx][orderedIndex] = {talentId, def}
+    local _, ST_classToken = UnitClass("player")
+
+    -- 3.3.5a UnitClass only returns 2 values (name, token).
+    -- classId (3rd return) was added in MoP 5.0, so we map it ourselves.
+    local CLASS_TOKEN_TO_ID = {
+        WARRIOR = 1, PALADIN = 2, HUNTER = 3, ROGUE = 4,
+        PRIEST = 5, DEATHKNIGHT = 6, SHAMAN = 7, MAGE = 8,
+        WARLOCK = 9, DRUID = 11,
+    }
+    local ST_classId = CLASS_TOKEN_TO_ID[ST_classToken]
+    local ST_classTrees = SURREAL_TALENT_TREES and SURREAL_TALENT_TREES[ST_classId]
+    local ST_orderedTalents = {}  -- [tabIdx] = {{id=, def=}, ...}
+    local ST_talentIndex    = {}  -- [tabIdx][talentId] = orderedIdx
+
+    -- Zone layout constants (must be declared before GetTalentInfo)
+    local SPEC_COL_START = 3
+    local SPEC_COLS = 7
+    local SIDE_ROWS = 5
+    local SIDE_COLS = 3
+    local HERO2_ROW_START = 5
+    local TREE_POINT_CAP = 8
+
+    -- Lazy-init: build ordered lists from tree config
+    -- Called on first use OR when ReceiveTalents fires, in case load order
+    -- meant SURREAL_TALENT_TREES wasn't ready at file-load time.
+    local function InitTreeData()
+        if not ST_classTrees then
+            ST_classTrees = SURREAL_TALENT_TREES and SURREAL_TALENT_TREES[ST_classId]
+        end
+        if not ST_classTrees then return end
+        if ST_orderedTalents[1] then return end  -- already built
+
+        for tabIdx, tab in ipairs(ST_classTrees.tabs) do
+            local ordered = {}
+            for talentId, def in pairs(tab.talents) do
+                ordered[#ordered + 1] = {id = talentId, def = def}
+            end
+            -- Sort: mastery first, then by row, col
+            table.sort(ordered, function(a, b)
+                local aDef = (type(a.def) == "table") and a.def or {}
+                local bDef = (type(b.def) == "table") and b.def or {}
+                local aMastery = aDef.mastery and true or false
+                local bMastery = bDef.mastery and true or false
+                if aMastery ~= bMastery then
+                    return aMastery and not bMastery
+                end
+
+                local aRow = tonumber(aDef.row) or 0
+                local bRow = tonumber(bDef.row) or 0
+                if aRow ~= bRow then
+                    return aRow < bRow
+                end
+
+                local aCol = tonumber(aDef.col) or 0
+                local bCol = tonumber(bDef.col) or 0
+                if aCol ~= bCol then
+                    return aCol < bCol
+                end
+
+                return (tonumber(a.id) or 0) < (tonumber(b.id) or 0)
+            end)
+            ST_orderedTalents[tabIdx] = ordered
+            ST_talentIndex[tabIdx] = {}
+            for i, entry in ipairs(ordered) do
+                ST_talentIndex[tabIdx][entry.id] = i
+            end
+        end
+    end
+
+    local function SyncStateFromBlizzard()
+        InitTreeData()
+
+        local talents = {}
+        local spent = 0
+        local tabs = {}
+
+        if ST_classTrees then
+            for tabIdx, tab in ipairs(ST_classTrees.tabs) do
+                local tabPoints = 0
+                for talentId, def in pairs(tab.talents) do
+                    local rank = 0
+                    if type(def.spells) == "table" and BlizzardIsSpellKnown then
+                        for r, spellId in ipairs(def.spells) do
+                            if spellId and BlizzardIsSpellKnown(spellId) then
+                                rank = r
+                            end
+                        end
+                    end
+                    if rank > 0 then
+                        talents[talentId] = rank
+                        spent = spent + rank
+                        tabPoints = tabPoints + rank
+                    end
+                end
+                tabs[tabIdx] = { name = tab.name, points = tabPoints }
+            end
+        end
+
+        local unspent = tonumber(BlizzardGetUnspentTalentPoints and BlizzardGetUnspentTalentPoints() or 0) or 0
+        ST_playerTalents = talents
+        ST_spent = spent
+        ST_unspent = unspent
+        ST_maxPoints = spent + unspent
+        ST_tabPointInfo = tabs
+        ST_dataReady = true
+        if UpdateTalents then UpdateTalents() end
+    end
+
+    local RequestTalentsFromServer
+    local SetServerWait
+
+    local function ScheduleTalentRefresh(delaySeconds)
+        local wait = tonumber(delaySeconds) or 0.6
+        if wait < 0 then wait = 0 end
+
+        local refresher = CreateFrame("Frame")
+        refresher.elapsed = 0
+        refresher:SetScript("OnUpdate", function(self, dt)
+            self.elapsed = self.elapsed + dt
+            if self.elapsed >= wait then
+                RequestTalentsFromServer()
+                SyncStateFromBlizzard()
+                self:SetScript("OnUpdate", nil)
+            end
+        end)
+    end
+
+    -- Try immediate init (works if Config loaded before Frame)
+    InitTreeData()
+
+    -- ── Compatibility API ────────────────────────────────────────────────
+    -- These shadow the global WoW functions within this scope.
+
+    local function GetNumTalentTabs()
+        InitTreeData()
+        if ST_classTrees then return #ST_classTrees.tabs end
+        return 0
+    end
+
+    local function GetNumTalents(tab)
+        local ord = ST_orderedTalents[tab]
+        return ord and #ord or 0
+    end
+
+    -- GetTalentInfo(tab, idx) → name, iconTex, tier, col, rank, maxRank,
+    --   isExceptional, available, previewRank, previewAvail
+    local function GetTalentInfo(tab, idx, ...)
+        local ord = ST_orderedTalents[tab]
+        if not ord or not ord[idx] then return nil end
+        local entry = ord[idx]
+        local def = entry.def
+        local talentId = entry.id
+
+        local rank = tonumber(ST_playerTalents[talentId]) or 0
+        local maxRank = tonumber(def.maxRank) or 0
+
+        -- Resolve name and icon from the spell (client has spell data)
+        local spellId = def.spells[1]
+        local name, _, iconTex
+        if spellId then
+            name, _, iconTex = GetSpellInfo(spellId)
+        end
+        name = name or ("Talent " .. talentId)
+        iconTex = iconTex or "Interface\\Icons\\INV_Misc_QuestionMark"
+
+        -- tier/col are display positions (0-based for compat)
+        local tier = (def.row or 1) - 1
+        local col  = (def.col or 1) - 1
+
+        -- isExceptional = has the "flags=1" bit (passive/active toggle)
+        local isExcept = (def.flags and def.flags > 0) or false
+
+        -- "available" = prereqs met + has unspent points
+        local rowOK = true
+        local dRow = tonumber(def.row or 0) or 0
+        local dCol = tonumber(def.col or 0) or 0
+        local isSpecTalent = (dRow >= 1 and dCol > SPEC_COL_START and dCol <= (SPEC_COL_START + SPEC_COLS))
+
+        local prereqOK = true
+        if isSpecTalent and type(def.prereqs) == "table" then
+            for _, p in ipairs(def.prereqs) do
+                local prereqId = tonumber(p and p.id)
+                local pRank = prereqId and (tonumber(ST_playerTalents[prereqId]) or 0) or 0
+                local needed = tonumber(p and p.rank)
+                if not needed or needed <= 0 then needed = 1 end
+                if pRank < needed then prereqOK = false; break end
+            end
+        end
+
+        local avail = rowOK and prereqOK and (ST_unspent - ST_previewSpent > 0)
+            and rank < maxRank
+
+        -- Preview rank
+        local previewDelta = tonumber(ST_previewPoints[talentId]) or 0
+        local previewRank = rank + previewDelta
+        if previewRank < 0 then previewRank = 0 end
+        if previewRank > maxRank then previewRank = maxRank end
+
+        local previewAvail = avail  -- simplified
+
+        return name, iconTex, tier, col, rank, maxRank,
+               isExcept, avail, previewRank, previewAvail
+    end
+
+    -- GetTalentTabInfo(tab) → name, iconTex, pointsSpent
+    local function GetTalentTabInfo(tab, ...)
+        if not ST_classTrees or not ST_classTrees.tabs[tab] then
+            return nil
+        end
+        local tabDef = ST_classTrees.tabs[tab]
+        local name = tabDef.name or "Unknown"
+        -- Icon: use the mastery talent's first spell icon
+        local iconTex = "Interface\\Icons\\INV_Misc_QuestionMark"
+        local masteryId = tabDef.masteryTalentId
+        if masteryId and tabDef.talents[masteryId] then
+            local sp = tabDef.talents[masteryId].spells[1]
+            if sp then
+                local _, _, ic = GetSpellInfo(sp)
+                if ic then iconTex = ic end
+            end
+        end
+        local pts = ST_tabPointInfo[tab] and ST_tabPointInfo[tab].points or 0
+        return name, iconTex, pts
+    end
+
+    local function GetUnspentTalentPoints(...)
+        local baseUnspent = tonumber(ST_unspent) or 0
+        if baseUnspent <= 0 and BlizzardGetUnspentTalentPoints then
+            local nativePoints = tonumber(BlizzardGetUnspentTalentPoints()) or 0
+            if nativePoints > baseUnspent then
+                baseUnspent = nativePoints
+            end
+        end
+        return math.max(0, baseUnspent - ST_previewSpent)
+    end
+
+    local function GetActiveTalentGroup(...)
+        return 1  -- We only have one talent group
+    end
+
+    local function TalentGroup()
+        return 1
+    end
+
+    local chosenHeroTree = nil
+
+    local function IsCappedZone(zone)
+        return zone == "class" or zone == "hero1" or zone == "hero2"
+    end
+
+    local function IsIgnoredCorner(localRow, localCol)
+        if localRow < 1 or localCol < 1 then return false end
+        if localCol ~= 1 and localCol ~= SIDE_COLS then return false end
+        return localRow == 1 or localRow == SIDE_ROWS
+    end
+
+    local TalentZone
+    local GetZonePoints
+    local PrereqOK
+    local AutoQueueHeroEntryTalent
+
+    -- Preview talent system (client-side only, before committing)
+    local function AddPreviewTalentPoints(tab, idx, delta, ...)
+        local ord = ST_orderedTalents[tab]
+        if not ord or not ord[idx] then return false, "Invalid talent" end
+
+        if delta > 0 then
+            local unspent = GetUnspentTalentPoints(false, false, TalentGroup()) or 0
+            if unspent <= 0 then
+                return false, "No unspent talent points"
+            end
+
+            local zone = TalentZone(tab, idx)
+            if not zone then
+                return false, "Invalid talent slot"
+            end
+            if zone == "hero1" then
+                if chosenHeroTree ~= 1 then
+                    return false, "Choose Hero Tree 1 first"
+                end
+            elseif zone == "hero2" then
+                if chosenHeroTree ~= 2 then
+                    return false, "Choose Hero Tree 2 first"
+                end
+            end
+
+            if IsCappedZone(zone) then
+                if GetZonePoints(tab, zone, true) >= TREE_POINT_CAP then
+                    return false, "Max points reached for this tree (8)"
+                end
+            end
+
+            if zone == "spec" and not PrereqOK(tab, idx) then
+                return false, "Prerequisites not met"
+            end
+        end
+
+        local talentId = ord[idx].id
+        local current = ST_previewPoints[talentId] or 0
+        local before = current
+        local newVal = current + delta
+        if newVal < 0 then newVal = 0 end
+        local def = ord[idx].def
+        local rank = ST_playerTalents[talentId] or 0
+        if rank + newVal > def.maxRank then
+            newVal = def.maxRank - rank
+        end
+        if newVal <= 0 then
+            ST_previewPoints[talentId] = nil
+        else
+            ST_previewPoints[talentId] = newVal
+        end
+        -- Recalculate total preview spent
+        ST_previewSpent = 0
+        for _, d in pairs(ST_previewPoints) do
+            ST_previewSpent = ST_previewSpent + d
+        end
+
+        if newVal == before then
+            if delta > 0 then
+                return false, "Talent already at max rank"
+            end
+            return false, "No queued points to remove"
+        end
+
+        return true
+    end
+
+    local function GetGroupPreviewTalentPointsSpent(...)
+        return ST_previewSpent
+    end
+
+    local function ResetGroupPreviewTalentPoints(...)
+        ST_previewPoints = {}
+        ST_previewSpent = 0
+    end
+
+    -- LearnTalent: sends native packet to server (single point)
+    local function LearnTalent(tab, idx)
+        if ST_waitingForServer then
+            PushTalentFeedback("Waiting for server reply...")
+            return
+        end
+
+        local ord = ST_orderedTalents[tab]
+        if not ord or not ord[idx] then return end
+        local talentId = ord[idx].id
+        local currentRank = tonumber(ST_playerTalents[talentId]) or 0
+
+        if talentId then
+            DebugTalent("Learn request talent=" .. tostring(talentId) .. " rank=" .. tostring(currentRank))
+            SetServerWait(true, "learn")
+            AIO.Handle("SurrealTalents", "LearnTalent", talentId, currentRank)
+            ScheduleTalentRefresh(0.6)
+        end
+    end
+
+    -- LearnPreviewTalents: commit all preview points
+    local function LearnPreviewTalents(...)
+        if ST_waitingForServer then
+            PushTalentFeedback("Waiting for server reply...")
+            return
+        end
+
+        local payload = {}
+        for talentId, delta in pairs(ST_previewPoints) do
+            local idNum = tonumber(talentId)
+            local dNum = tonumber(delta)
+            if idNum and dNum and dNum > 0 then
+                payload[idNum] = math.floor(dNum)
+            end
+        end
+
+        if next(payload) then
+            local queuedCount = 0
+            for _ in pairs(payload) do queuedCount = queuedCount + 1 end
+            DebugTalent("Apply clicked, queued talents=" .. tostring(queuedCount))
+            SetServerWait(true, "apply")
+            AIO.Handle("SurrealTalents", "ApplyPreviewTalents", payload)
+            ScheduleTalentRefresh(0.6)
+        end
+        ST_previewPoints = {}
+        ST_previewSpent = 0
+    end
+
+    -- GetTalentPrereqs: returns prereq info for rendering arrows
+    local function GetTalentPrereqs(tab, idx)
+        local ord = ST_orderedTalents[tab]
+        if not ord or not ord[idx] then return nil end
+        local def = ord[idx].def
+        if type(def.prereqs) ~= "table" or #def.prereqs == 0 then return nil end
+        local p = def.prereqs[1]
+        if type(p) ~= "table" then return nil end
+        local prereqId = tonumber(p.id)
+        if not prereqId then return nil end
+        -- Find prereq's display position
+        local pDef
+        if ST_classTrees then
+            for _, t in ipairs(ST_classTrees.tabs) do
+                if t.talents[prereqId] then
+                    pDef = t.talents[prereqId]
+                    break
+                end
+            end
+        end
+        if not pDef then return nil end
+        local pTier = (tonumber(pDef.row) or 1) - 1
+        local pCol  = (tonumber(pDef.col) or 1) - 1
+        -- "met" = prereq rank achieved
+        local pRank = tonumber(ST_playerTalents[prereqId]) or 0
+        local needed = tonumber(p.rank)
+        if not needed or needed <= 0 then needed = 1 end
+        local met = pRank >= needed and 1 or 0
+        return pTier, pCol, met
+    end
+
+    -- Request talents from server on frame open
+    RequestTalentsFromServer = function()
+        DebugTalent("RequestTalents")
+        AIO.Handle("SurrealTalents", "RequestTalents")
+    end
 
     -- =================================================================
     --  C O N F I G U R A T I O N
@@ -153,7 +509,7 @@ else
         SIDE_BTN    = 36,          -- dummy slot icon size
         SIDE_SPC    = 50,          -- spacing between slots
         SIDE_COLS   = 3,
-        SIDE_ROWS   = 4,
+        SIDE_ROWS   = 5,
 
         -- Glyph bar ---------------------------------------------------
         GLYPH_SIZE  = 30,          -- glyph icon size
@@ -178,69 +534,7 @@ else
         TXT_LOCKED  = { 0.38, 0.38, 0.38 },
     }
 
-    -- =================================================================
-    --  T A L E N T   L A Y O U T   O V E R R I D E S
-    --
-    --  Format:
-    --    TALENT_LAYOUTS["CLASSTOKEN"][tabPage][talentIndex] = { row, col }
-    --
-    --  row / col are 1-based.  row 1 = top, col 1 = left.
-    --  When no override exists the DBC position (tier, column) is used.
-    --
-    --  To discover talentIndex numbers run:   /surrealtalents debug
-    --
-    --  Example — move Warlock Affliction talent #3 to row 1, col 6:
-    --
-    --    TALENT_LAYOUTS["WARLOCK"] = {
-    --        [1] = {                        -- tab 1  (Affliction)
-    --            [3] = { 1, 6 },            -- talentIndex 3 → row 1 col 6
-    --        },
-    --    }
-    -- =================================================================
 
-    local TALENT_LAYOUTS = {
-        -- Warlock starter layout — 5 cols × 11 rows per spec
-        -- Talent index 1 = mastery (hidden), so indices start at 2
-        ["WARLOCK"] = {
-            [1] = {   -- Affliction (28 talents, #1=mastery)
-                [2]  = { 1, 1 },  [3]  = { 1, 2 },  [4]  = { 1, 3 },
-                [5]  = { 2, 1 },  [6]  = { 2, 2 },  [7]  = { 2, 3 },  [8]  = { 2, 4 },
-                [9]  = { 3, 1 },  [10] = { 3, 2 },  [11] = { 3, 3 },
-                [12] = { 4, 1 },  [13] = { 4, 1 },  [14] = { 4, 4 },
-                [15] = { 5, 1 },  [16] = { 5, 2 },  [17] = { 5, 3 },
-                [18] = { 6, 1 },  [19] = { 6, 2 },
-                [20] = { 7, 1 },  [21] = { 7, 2 },  [22] = { 7, 3 },
-                [23] = { 8, 1 },  [24] = { 8, 3 },
-                [25] = { 9, 1 },  [26] = { 9, 2 },
-                [27] = { 10, 1 }, [28] = { 10, 2 },
-            },
-            [2] = {   -- Demonology (27 talents, #1=mastery)
-                [2]  = { 1, 1 },  [3]  = { 1, 2 },  [4]  = { 1, 3 },  [5]  = { 1, 4 },
-                [6]  = { 2, 1 },  [7]  = { 2, 2 },  [8]  = { 2, 3 },
-                [9]  = { 3, 1 },  [10] = { 3, 2 },  [11] = { 3, 3 },  [12] = { 3, 4 },
-                [13] = { 4, 2 },  [14] = { 4, 3 },
-                [15] = { 5, 1 },  [16] = { 5, 3 },
-                [17] = { 6, 2 },  [18] = { 6, 3 },
-                [19] = { 7, 1 },  [20] = { 7, 2 },  [21] = { 7, 3 },
-                [22] = { 8, 2 },  [23] = { 8, 3 },
-                [24] = { 9, 1 },  [25] = { 9, 2 },  [26] = { 9, 3 },
-                [27] = { 10, 2 },
-            },
-            [3] = {   -- Destruction (26 talents, #1=mastery)
-                [2]  = { 1, 2 },  [3]  = { 1, 3 },
-                [4]  = { 2, 1 },  [5]  = { 2, 2 },  [6]  = { 2, 3 },
-                [7]  = { 3, 1 },  [8]  = { 3, 2 },  [9]  = { 3, 3 },
-                [10] = { 4, 1 },  [11] = { 4, 2 },  [12] = { 4, 4 },
-                [13] = { 5, 1 },  [14] = { 5, 2 },  [15] = { 5, 3 },
-                [16] = { 6, 1 },  [17] = { 6, 3 },
-                [18] = { 7, 2 },  [19] = { 7, 3 },
-                [20] = { 8, 1 },  [21] = { 8, 4 },
-                [22] = { 9, 2 },  [23] = { 9, 3 },
-                [24] = { 10, 1 }, [25] = { 10, 2 }, [26] = { 10, 3 },
-            },
-        },
-        -- Add other classes here as needed
-    }
 
     -- =================================================================
     --  C H O I C E   N O D E S
@@ -249,7 +543,7 @@ else
     --    CHOICE_NODES["CLASSTOKEN"][tabPage] = { {idxA, idxB}, ... }
     --
     --  Two talents sharing a grid cell — player picks one, the other
-    --  becomes locked.  Both share the same TALENT_LAYOUTS position.
+    --  becomes locked.  Both share the same DBC position.
     --  The first talent in the pair renders on the LEFT half, the
     --  second on the RIGHT half.  A diamond-shaped border is drawn.
     --
@@ -267,16 +561,50 @@ else
     -- =================================================================
     local activeTab   = 1
     local buttons     = {}
-    local MAX_BTNS    = 60        -- button pool size (>= max talents per tree)
+    local MAX_BTNS    = 90        -- button pool size (>= max talents per tree)
     local previewMode = true      -- preview on by default
     local resetCostCache = nil    -- cached from server
     local chosenSpecTab = nil     -- spec chosen via overlay (nil = none)
+    local forceSpecSelection = false
     local choiceSelected = {}     -- choiceSelected["tab-row-col"] = talentIdx
 
     -- Forward declarations
     local UpdateTalents
     local applyBtn, cancelBtn, resetBtn
-    local classTreePanel, heroTreePanel, glyphFrame, glyphSlots
+    local classTreePanel, heroTreePanel, heroTreePanel2, glyphFrame, glyphSlots
+    local heroChoiceOverlay, RefreshHeroOverlay
+    local buildBar
+
+    local function PushTalentFeedback(msg)
+        if UIErrorsFrame and UIErrorsFrame.AddMessage then
+            UIErrorsFrame:AddMessage(msg or "Action blocked", 1.0, 0.25, 0.25, 1.0)
+        elseif DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff4444[Talents]|r " .. (msg or "Action blocked"))
+        end
+    end
+
+    SetServerWait = function(waiting, reason)
+        ST_waitingForServer = waiting and true or false
+        ST_waitReason = ST_waitingForServer and (reason or "request") or nil
+
+        if applyBtn then
+            if ST_waitingForServer then
+                applyBtn:Disable()
+                applyBtn.text:SetText("|cffffff00Wait...|r")
+            else
+                applyBtn:Enable()
+                applyBtn.text:SetText("|cff00cc00Apply|r")
+            end
+        end
+
+        if resetBtn then
+            if ST_waitingForServer then
+                resetBtn:Disable()
+            else
+                resetBtn:Enable()
+            end
+        end
+    end
 
     -- AIO handlers for server → client messages
     local ClientHandlers = AIO.AddHandlers("SurrealTalents", {})
@@ -285,13 +613,10 @@ else
     --  H E L P E R S
     -- =================================================================
     local function ClassToken()
-        local _, tok = UnitClass("player")
-        return tok
+        return ST_classToken
     end
 
-    local function TalentGroup()
-        return GetActiveTalentGroup(false, false) or 1
-    end
+    -- TalentGroup already defined in shim above
 
     -- Choice node helpers (must be after ClassToken / TalentGroup)
     local function ChoicePartner(tab, idx)
@@ -323,32 +648,94 @@ else
         return rank and rank > 0
     end
 
-    local function Override(tab, idx)
-        local c = TALENT_LAYOUTS[ClassToken()]
-        if c and c[tab] and c[tab][idx] then
-            return c[tab][idx]
-        end
-    end
-
+    -- Returns 1-based row, col for display from SURREAL_TALENT_TREES.
+    -- No DBC dependency.
     local function TalentPos(tab, idx)
-        local ov = Override(tab, idx)
-        if ov then return ov[1], ov[2] end
-        local _, _, tier, col = GetTalentInfo(tab, idx)
-        return tier, col
+        local ord = ST_orderedTalents[tab]
+        if ord and ord[idx] then
+            return ord[idx].def.row, ord[idx].def.col
+        end
+        return 1, 1
     end
 
-    local function PrereqOK(tab, idx)
+    TalentZone = function(tab, idx)
+        local row, col = TalentPos(tab, idx)
+        if not row or not col then return nil end
+
+        if row >= 1 and row <= SIDE_ROWS and col >= 1 and col <= SIDE_COLS then
+            if IsIgnoredCorner(row, col) then
+                return nil
+            end
+            return "class", row, col
+        end
+
+        if row >= 1 and col > SPEC_COL_START and col <= (SPEC_COL_START + SPEC_COLS) then
+            return "spec", row, col - SPEC_COL_START
+        end
+
+        local heroColStart = SPEC_COL_START + SPEC_COLS
+        if col > heroColStart and col <= (heroColStart + SIDE_COLS) then
+            if row >= 1 and row <= SIDE_ROWS then
+                local heroCol = col - heroColStart
+                if IsIgnoredCorner(row, heroCol) then
+                    return nil
+                end
+                return "hero1", row, heroCol
+            end
+            if row > HERO2_ROW_START and row <= (HERO2_ROW_START + SIDE_ROWS) then
+                local hero2Row = row - HERO2_ROW_START
+                local heroCol = col - heroColStart
+                if IsIgnoredCorner(hero2Row, heroCol) then
+                    return nil
+                end
+                return "hero2", hero2Row, heroCol
+            end
+        end
+
+        return nil
+    end
+
+    GetZonePoints = function(tab, zoneName, includePreview)
+        local ord = ST_orderedTalents[tab]
+        if not ord then return 0 end
+        local total = 0
+        for idx, entry in ipairs(ord) do
+            local zone = TalentZone(tab, idx)
+            if zone == zoneName then
+                local tid = entry.id
+                local base = ST_playerTalents[tid] or 0
+                local queued = includePreview and (ST_previewPoints[tid] or 0) or 0
+                total = total + base + queued
+            end
+        end
+        return total
+    end
+
+    PrereqOK = function(tab, idx)
         local pTier, pCol, met = GetTalentPrereqs(tab, idx)
-        if not pTier then return true end        -- no dependency
+        if not pTier then return true end
         return met and met ~= 0
+    end
+
+    local function GetMasteryTalentIndex(tab)
+        local ord = ST_orderedTalents[tab]
+        if not ord then return nil end
+        for idx, entry in ipairs(ord) do
+            if entry and type(entry.def) == "table" and entry.def.mastery then
+                return idx
+            end
+        end
+        return nil
     end
 
     -- Returns the tab where talent #1 (mastery) has rank > 0, or nil
     local function GetCommittedSpec()
-        local tg = TalentGroup()
-        for tab = 1, (GetNumTalentTabs() or 0) do
-            local _, _, _, _, rank = GetTalentInfo(tab, 1, false, false, tg)
-            if rank and rank > 0 then return tab end
+        for tab = 1, GetNumTalentTabs() do
+            local masteryIdx = GetMasteryTalentIndex(tab)
+            if masteryIdx then
+                local _, _, _, _, rank = GetTalentInfo(tab, masteryIdx)
+                if rank and rank > 0 then return tab end
+            end
         end
         return nil
     end
@@ -407,22 +794,33 @@ else
     --  S P E C   T A B S
     -- =================================================================
     local tabBtns = {}
+    local MAX_SPEC_TABS = 5
+    local TAB_GAP = 8
+    local TAB_ROW_WIDTH = 900
+    local TAB_W = math.floor((TAB_ROW_WIDTH - (TAB_GAP * (MAX_SPEC_TABS - 1))) / MAX_SPEC_TABS)
+    local TAB_START_X = math.floor((980 - TAB_ROW_WIDTH) / 2)
 
     local function RefreshTabLabels()
-        for i = 1, 3 do
-            local name, iconTex, pts = GetTalentTabInfo(i, false, false, TalentGroup())
+        local numTabs = GetNumTalentTabs() or 0
+        for i = 1, MAX_SPEC_TABS do
             local tb = tabBtns[i]
-            if tb and name then
-                tb.label:SetText(name .. "  |cffffd100" .. (pts or 0) .. "|r")
-                tb.icon:SetTexture(iconTex)
+            if tb then
+                if i <= numTabs then
+                    local name, iconTex, pts = GetTalentTabInfo(i, false, false, TalentGroup())
+                    tb.label:SetText(name or ("Spec " .. i))
+                    tb.icon:SetTexture(iconTex)
+                    tb:Show()
+                else
+                    tb:Hide()
+                end
             end
         end
     end
 
-    for i = 1, 3 do
+    for i = 1, MAX_SPEC_TABS do
         local tb = CreateFrame("Button", nil, frame)
-        tb:SetSize(280, 30)
-        tb:SetPoint("TOPLEFT", 40 + (i - 1) * 310, -38)
+        tb:SetSize(TAB_W, 30)
+        tb:SetPoint("TOPLEFT", TAB_START_X + (i - 1) * (TAB_W + TAB_GAP), -38)
 
         tb:SetBackdrop({
             bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -486,11 +884,11 @@ else
     --  G R I D   C O N T A I N E R  (centre — spec talents)
     -- =================================================================
     local grid = CreateFrame("Frame", nil, frame)
-    grid:SetSize(350, 510)
+    grid:SetSize(500, 510)
     grid:SetPoint("CENTER", 0, 10)
 
     -- =================================================================
-    --  S I D E   P A N E L S  (Class Tree left / Hero Tree right)
+    --  S I D E   P A N E L S  (Class Tree + Hero Tree 1 + Hero Tree 2)
     -- =================================================================
     local function MakeSidePanel(panelName, headerText, anchor, offX, offY)
         local cw = (CFG.SIDE_COLS - 1) * CFG.SIDE_SPC + CFG.SIDE_BTN
@@ -500,7 +898,6 @@ else
         local p = CreateFrame("Frame", panelName, frame)
         p:SetSize(pw, ph)
         p:SetPoint(anchor, offX, offY)
-        -- No backdrop — borderless, blends into the main frame
 
         local hdr = p:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         hdr:SetPoint("TOP", 0, -2)
@@ -508,16 +905,20 @@ else
         p.header = hdr
 
         p.slots = {}
+        p.slotMap = {}
         for row = 1, CFG.SIDE_ROWS do
             for col = 1, CFG.SIDE_COLS do
-                local s = CreateFrame("Frame", nil, p)
+                local s = CreateFrame("Button", nil, p)
                 s:SetSize(CFG.SIDE_BTN, CFG.SIDE_BTN)
                 s:SetPoint("TOPLEFT",
                     6 + (col - 1) * CFG.SIDE_SPC,
                     -18 - (row - 1) * CFG.SIDE_SPC)
+                s:EnableMouse(true)
+                s:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 
-                local bg = s:CreateTexture(nil, "BACKGROUND")
-                bg:SetAllPoints()
+                    local bg = s:CreateTexture(nil, "BACKGROUND")
+                    bg:SetAllPoints()
+
                 bg:SetTexture(0.14, 0.14, 0.17)
 
                 local ic = s:CreateTexture(nil, "ARTWORK")
@@ -526,23 +927,308 @@ else
                 ic:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
                 ic:SetDesaturated(true)
                 ic:SetAlpha(0.25)
+                s.icon = ic
+                s.bg = bg
+                s.gridRow = row
+                s.gridCol = col
+                s.tTab = nil
+                s.tIdx = nil
+                s:SetScript("OnClick", function(self, button)
+                    if not self.tTab or not self.tIdx then return end
+                    if previewMode then
+                        local delta = (button == "RightButton") and -1 or 1
+                        local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, delta, false, TalentGroup())
+                        if not ok then
+                            PushTalentFeedback(err)
+                        end
+                        UpdateTalents()
+                    else
+                        if button == "LeftButton" then
+                            LearnTalent(self.tTab, self.tIdx)
+                        end
+                    end
+                end)
 
                 p.slots[#p.slots + 1] = s
+                p.slotMap[row .. ":" .. col] = s
             end
         end
-
-        local cs = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        cs:SetPoint("BOTTOM", 0, 2)
-        cs:SetText("|cff666666Coming Soon|r")
 
         p:Hide()
         return p
     end
 
+    -- Class tree goes LEFT, hero trees go RIGHT (chosen via overlay)
     classTreePanel = MakeSidePanel("SurrealClassTree", "Class Tree",
         "LEFT", 16, 0)
-    heroTreePanel  = MakeSidePanel("SurrealHeroTree",  "Hero Tree",
+    heroTreePanel  = MakeSidePanel("SurrealHeroTree1",  "Hero Tree 1",
         "RIGHT", -16, 0)
+    heroTreePanel2 = MakeSidePanel("SurrealHeroTree2",  "Hero Tree 2",
+        "RIGHT", -16, 0)
+
+    -- =================================================================
+    --  H E R O  T R E E  C H O I C E  O V E R L A Y
+    -- =================================================================
+    chosenHeroTree = nil  -- nil = not chosen, 1 = tree 1, 2 = tree 2
+
+    heroChoiceOverlay = CreateFrame("Frame", "SurrealHeroChoice", frame)
+    heroChoiceOverlay:SetPoint("RIGHT", -6, 0)
+    local heroPanelW = (CFG.SIDE_COLS - 1) * CFG.SIDE_SPC + CFG.SIDE_BTN + 24
+    heroChoiceOverlay:SetSize(heroPanelW, 320)
+    heroChoiceOverlay:SetFrameLevel(frame:GetFrameLevel() + 12)
+    heroChoiceOverlay:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    heroChoiceOverlay:SetBackdropColor(0.08, 0.08, 0.12, 0.95)
+    heroChoiceOverlay:SetBackdropBorderColor(0.40, 0.40, 0.45, 1)
+    heroChoiceOverlay:Hide()
+
+    local heroChoiceTitle = heroChoiceOverlay:CreateFontString(nil, "OVERLAY",
+        "GameFontNormal")
+    heroChoiceTitle:SetPoint("TOP", 0, -12)
+    heroChoiceTitle:SetText("|cffffd100Choose Hero Tree|r")
+
+    local heroChoiceSub = heroChoiceOverlay:CreateFontString(nil, "OVERLAY",
+        "GameFontNormalSmall")
+    heroChoiceSub:SetPoint("TOP", heroChoiceTitle, "BOTTOM", 0, -4)
+    heroChoiceSub:SetText("|cff888888Select one to unlock|r")
+
+    local heroChoiceBtns = {}
+    for hi = 1, 2 do
+        local hb = CreateFrame("Button", nil, heroChoiceOverlay)
+        hb:SetSize(heroPanelW - 20, 110)
+        hb:SetPoint("TOP", heroChoiceOverlay, "TOP", 0, -48 - (hi - 1) * 120)
+        hb:SetBackdrop({
+            bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        hb:SetBackdropColor(0.12, 0.12, 0.16, 0.95)
+        hb:SetBackdropBorderColor(0.35, 0.35, 0.40, 1)
+
+        -- Entry talent icon
+        local hIcon = hb:CreateTexture(nil, "ARTWORK")
+        hIcon:SetSize(40, 40)
+        hIcon:SetPoint("LEFT", 12, 0)
+        hIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+        hb.entryIcon = hIcon
+
+        -- Tree name
+        local hName = hb:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        hName:SetPoint("TOPLEFT", hIcon, "TOPRIGHT", 10, -2)
+        hName:SetText("|cffaaaacc Hero Tree " .. hi .. "|r")
+        hb.treeName = hName
+
+        -- Description
+        local hDesc = hb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hDesc:SetPoint("TOPLEFT", hName, "BOTTOMLEFT", 0, -4)
+        hDesc:SetWidth(heroPanelW - 80)
+        hDesc:SetText("|cff666666Entry talent preview|r")
+        hb.treeDesc = hDesc
+
+        -- Select label
+        local hSelect = hb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        hSelect:SetPoint("BOTTOM", 0, 6)
+        hSelect:SetText("|cff888888Click to select|r")
+        hb.selectLabel = hSelect
+
+        hb:SetScript("OnEnter", function(self)
+            self:SetBackdropColor(0.18, 0.18, 0.25, 0.95)
+            self:SetBackdropBorderColor(1, 0.82, 0, 1)
+            self.selectLabel:SetText("|cffffd100Click to select|r")
+        end)
+        hb:SetScript("OnLeave", function(self)
+            self:SetBackdropColor(0.12, 0.12, 0.16, 0.95)
+            self:SetBackdropBorderColor(0.35, 0.35, 0.40, 1)
+            self.selectLabel:SetText("|cff888888Click to select|r")
+        end)
+
+        local heroIdx = hi
+        hb:SetScript("OnClick", function()
+            chosenHeroTree = heroIdx
+            AutoQueueHeroEntryTalent(heroIdx)
+            heroChoiceOverlay:Hide()
+            UpdateTalents()
+        end)
+
+        heroChoiceBtns[hi] = hb
+    end
+
+    local function GetHeroEntryTalentInfo(tab, heroIdx)
+        local ord = ST_orderedTalents[tab]
+        if not ord then return nil end
+        local targetZone = (heroIdx == 1) and "hero1" or "hero2"
+
+        local candidateIdx = nil
+        for idx = 1, #ord do
+            local zone, row, col = TalentZone(tab, idx)
+            if zone == targetZone and row == 1 and col == 2 then
+                candidateIdx = idx
+                break
+            end
+        end
+        if not candidateIdx then
+            for idx = 1, #ord do
+                local zone, row = TalentZone(tab, idx)
+                if zone == targetZone and row == 1 then
+                    candidateIdx = idx
+                    break
+                end
+            end
+        end
+        if not candidateIdx then return nil end
+
+        local def = ord[candidateIdx].def or {}
+        local spellId = type(def.spells) == "table" and def.spells[1] or nil
+        local name, icon = nil, nil
+        if spellId then
+            name, _, icon = GetSpellInfo(spellId)
+        end
+        local desc = spellId and ((GetSpellDescription and GetSpellDescription(spellId))
+            or select(2, GetSpellInfo(spellId))) or nil
+
+        return {
+            spellId = spellId,
+            name = name,
+            icon = icon,
+            desc = desc,
+        }
+    end
+
+    local function SyncChosenHeroTree(tab)
+        if not tab then return end
+        local hero1Committed = GetZonePoints(tab, "hero1", false)
+        local hero2Committed = GetZonePoints(tab, "hero2", false)
+        if hero1Committed > 0 and hero2Committed <= 0 then
+            chosenHeroTree = 1
+        elseif hero2Committed > 0 and hero1Committed <= 0 then
+            chosenHeroTree = 2
+        elseif hero1Committed > 0 and hero2Committed > 0 then
+            if chosenHeroTree ~= 1 and chosenHeroTree ~= 2 then
+                chosenHeroTree = 1
+            end
+        end
+    end
+
+    RefreshHeroOverlay = function(tab)
+        local active = tab or activeTab or GetCommittedSpec() or chosenSpecTab
+        for hi = 1, 2 do
+            local hb = heroChoiceBtns[hi]
+            local entry = active and GetHeroEntryTalentInfo(active, hi) or nil
+            hb.treeName:SetText("|cffaaaacc Hero Tree " .. hi .. "|r")
+            if entry and entry.name then
+                hb.treeDesc:SetText("|cff88ccffLearns:|r " .. entry.name)
+                hb.entryIcon:SetTexture(entry.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                hb.entryIcon:SetDesaturated(false)
+                hb.entryIcon:SetAlpha(1)
+                hb.entryIcon.spellId = entry.spellId
+            else
+                hb.treeDesc:SetText("|cff666666No entry talent configured|r")
+                hb.entryIcon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+                hb.entryIcon:SetDesaturated(true)
+                hb.entryIcon:SetAlpha(0.35)
+            end
+        end
+    end
+
+    local function RefreshSidePanel(panel, tab, zoneName, titleText)
+        if not panel then return end
+
+        panel.header:SetText(titleText or "")
+
+        for _, slot in ipairs(panel.slots or {}) do
+            local isCorner = IsIgnoredCorner(slot.gridRow or 0, slot.gridCol or 0)
+            if isCorner then
+                slot:Hide()
+            else
+                slot:Show()
+            end
+            slot.tTab = nil
+            slot.tIdx = nil
+            if slot.icon then
+                slot.icon:SetTexture("Interface\\Icons\\INV_Misc_QuestionMark")
+                slot.icon:SetDesaturated(true)
+                slot.icon:SetAlpha(0.25)
+            end
+            if not slot.rankText then
+                local rt = slot:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                rt:SetPoint("BOTTOMRIGHT", -1, 1)
+                rt:SetFont(rt:GetFont(), 9, "OUTLINE")
+                slot.rankText = rt
+            end
+            slot.rankText:SetText("")
+        end
+
+        local tg = TalentGroup()
+        local num = GetNumTalents(tab) or 0
+        for idx = 1, num do
+            local zone, row, col = TalentZone(tab, idx)
+            if zone == zoneName then
+                local key = tostring(row) .. ":" .. tostring(col)
+                local slot = panel.slotMap and panel.slotMap[key]
+                if slot and slot.icon then
+                    local name, iconTex, _, _, rank, maxRank, _, avail, previewRank =
+                        GetTalentInfo(tab, idx, false, false, tg)
+                    if name and iconTex then
+                        local displayRank = rank or 0
+                        if previewMode and previewRank and previewRank > displayRank then
+                            displayRank = previewRank
+                        end
+                        slot.tTab = tab
+                        slot.tIdx = idx
+                        slot.icon:SetTexture(iconTex)
+                        slot.icon:SetDesaturated(false)
+                        slot.icon:SetAlpha((displayRank > 0 or avail) and 1 or 0.75)
+                        slot.rankText:SetText(displayRank .. "/" .. (maxRank or 0))
+                    end
+                end
+            end
+        end
+    end
+
+    AutoQueueHeroEntryTalent = function(heroIdx)
+        local tab = activeTab
+        if not tab or tab <= 0 then return end
+        local targetZone = (heroIdx == 1) and "hero1" or "hero2"
+        local ord = ST_orderedTalents[tab]
+        if not ord then return end
+
+        local entryIdx = nil
+        for idx = 1, #ord do
+            local zone, row, col = TalentZone(tab, idx)
+            if zone == targetZone and row == 1 and col == 2 then
+                entryIdx = idx
+                break
+            end
+        end
+        if not entryIdx then
+            for idx = 1, #ord do
+                local zone, row = TalentZone(tab, idx)
+                if zone == targetZone and row == 1 then
+                    entryIdx = idx
+                    break
+                end
+            end
+        end
+        if not entryIdx then return end
+
+        local _, _, _, _, rank, _, _, _, previewRank = GetTalentInfo(tab, entryIdx, false, false, TalentGroup())
+        local current = rank or 0
+        if previewMode and previewRank and previewRank > current then
+            current = previewRank
+        end
+
+        if current <= 0 then
+            local ok, err = AddPreviewTalentPoints(tab, entryIdx, 1, false, TalentGroup())
+            if not ok then
+                PushTalentFeedback(err)
+            end
+        end
+    end
 
     -- =================================================================
     --  G L Y P H   B A R
@@ -908,10 +1594,12 @@ else
     specSubtitle:SetText("Select a mastery to begin building your talents.")
 
     local specBtns = {}
-    for si = 1, 3 do
+    for si = 1, MAX_SPEC_TABS do
         local sb = CreateFrame("Button", nil, specOverlay)
-        sb:SetSize(260, 280)
-        sb:SetPoint("TOP", specOverlay, "TOP", (si - 2) * 290, -150)
+        sb:SetSize(180, 240)
+        local xOffset = (si - ((MAX_SPEC_TABS + 1) / 2)) * 190
+        local yOffset = -170
+        sb:SetPoint("TOP", specOverlay, "TOP", xOffset, yOffset)
         sb:SetBackdrop({
             bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -952,7 +1640,7 @@ else
         local mName = sb:CreateFontString(nil, "OVERLAY",
             "GameFontNormal")
         mName:SetPoint("TOP", mIcon, "BOTTOM", 0, -6)
-        mName:SetWidth(230)
+        mName:SetWidth(160)
         sb.masteryName = mName
 
         -- "Select" label at bottom
@@ -970,8 +1658,25 @@ else
             self.selectLabel:SetText("|cffffd100Click to select|r")
             if self.tabIdx then
                 GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-                GameTooltip:SetTalent(self.tabIdx, 1, false, false,
-                    TalentGroup())
+                -- Manual tooltip from shim data (SetTalent uses native data)
+                local tName, tIcon, _, _, tRank, tMax = GetTalentInfo(self.tabIdx, 1)
+                if tName then
+                    GameTooltip:AddLine(tName, 1, 1, 1)
+                    -- Show spell description from current/first rank
+                    local ord = ST_orderedTalents[self.tabIdx]
+                    if ord and ord[1] then
+                        local def = ord[1].def
+                        local spellIdx = math.max(tRank, 1)
+                        local sp = def.spells[spellIdx]
+                        if sp then
+                            local desc = GetSpellDescription and GetSpellDescription(sp)
+                                or select(2, GetSpellInfo(sp))
+                            if desc and desc ~= "" then
+                                GameTooltip:AddLine(desc, 1, 0.82, 0, true)
+                            end
+                        end
+                    end
+                end
                 GameTooltip:Show()
             end
         end)
@@ -984,8 +1689,13 @@ else
 
         local specIdx = si
         sb:SetScript("OnClick", function()
+            forceSpecSelection = false
             chosenSpecTab = specIdx
-            AddPreviewTalentPoints(specIdx, 1, 1, false, TalentGroup())
+            chosenHeroTree = nil
+            local masteryIdx = GetMasteryTalentIndex(specIdx)
+            if masteryIdx then
+                AddPreviewTalentPoints(specIdx, masteryIdx, 1, false, TalentGroup())
+            end
             activeTab = specIdx
             UpdateTalents()
         end)
@@ -994,9 +1704,10 @@ else
     end
 
     local function RefreshSpecOverlay()
+        InitTreeData()
         local tg = TalentGroup()
         local numTabs = GetNumTalentTabs() or 0
-        for si = 1, 3 do
+        for si = 1, MAX_SPEC_TABS do
             local sb = specBtns[si]
             if si <= numTabs then
                 local tabName, tabIcon =
@@ -1073,8 +1784,12 @@ else
                     local key = self.tTab .. "-" .. r .. "-" .. c
                     choiceSelected[key] = self.tIdx
                     if previewMode then
-                        AddPreviewTalentPoints(self.tTab, self.tIdx, 1,
+                        local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, 1,
                             false, TalentGroup())
+                        if not ok then
+                            PushTalentFeedback(err)
+                        end
+                        UpdateTalents()
                     else
                         LearnTalent(self.tTab, self.tIdx)
                     end
@@ -1084,8 +1799,12 @@ else
                 -- Choice node right-click: remove preview point
                 if partner and button == "RightButton" then
                     if previewMode then
-                        AddPreviewTalentPoints(self.tTab, self.tIdx, -1,
+                        local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, -1,
                             false, TalentGroup())
+                        if not ok then
+                            PushTalentFeedback(err)
+                        end
+                        UpdateTalents()
                         -- If rank drops to 0, clear selection so both show again
                         local tg = TalentGroup()
                         local _, _, _, _, rk, _, _, _, prev =
@@ -1104,16 +1823,24 @@ else
 
                 -- Normal talent handling
                 if ChoiceBlocked(self.tTab, self.tIdx) then
+                    PushTalentFeedback("Choice already locked by the other talent")
                     return
                 end
                 if previewMode then
                     if button == "RightButton" then
-                        AddPreviewTalentPoints(self.tTab, self.tIdx, -1,
+                        local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, -1,
                             false, TalentGroup())
+                        if not ok then
+                            PushTalentFeedback(err)
+                        end
                     else
-                        AddPreviewTalentPoints(self.tTab, self.tIdx, 1,
+                        local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, 1,
                             false, TalentGroup())
+                        if not ok then
+                            PushTalentFeedback(err)
+                        end
                     end
+                    UpdateTalents()
                 else
                     if button == "LeftButton" then
                         LearnTalent(self.tTab, self.tIdx)
@@ -1126,7 +1853,37 @@ else
         btn:SetScript("OnEnter", function(self)
             if self.tTab and self.tIdx then
                 GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetTalent(self.tTab, self.tIdx, false, false, TalentGroup())
+                -- Manual tooltip (SetTalent uses native data, won't match custom)
+                local tName, tIcon, _, _, tRank, tMax = GetTalentInfo(self.tTab, self.tIdx)
+                if tName then
+                    GameTooltip:AddLine(tName, 1, 1, 1)
+                    GameTooltip:AddLine(string.format("Rank %d/%d", tRank, tMax), 1, 0.82, 0)
+                    -- Show spell description from current/next rank
+                    local ord = ST_orderedTalents[self.tTab]
+                    if ord and ord[self.tIdx] then
+                        local def = ord[self.tIdx].def
+                        local curSpell = def.spells[math.max(tRank, 1)]
+                        if curSpell then
+                            local desc = GetSpellDescription and GetSpellDescription(curSpell)
+                                or select(2, GetSpellInfo(curSpell))
+                            if desc and desc ~= "" then
+                                GameTooltip:AddLine(" ")
+                                GameTooltip:AddLine(desc, 1, 1, 1, true)
+                            end
+                        end
+                        -- Show next rank if not maxed
+                        if tRank < tMax and def.spells[tRank + 1] then
+                            local nextSp = def.spells[tRank + 1]
+                            local nDesc = GetSpellDescription and GetSpellDescription(nextSp)
+                                or select(2, GetSpellInfo(nextSp))
+                            if nDesc and nDesc ~= "" then
+                                GameTooltip:AddLine(" ")
+                                GameTooltip:AddLine("|cff00ff00Next rank:|r", 0, 1, 0)
+                                GameTooltip:AddLine(nDesc, 1, 1, 1, true)
+                            end
+                        end
+                    end
+                end
                 local partner = ChoicePartner(self.tTab, self.tIdx)
                 if partner then
                     GameTooltip:AddLine(" ")
@@ -1147,12 +1904,13 @@ else
     --  U P D A T E   /   R E F R E S H
     -- =================================================================
     UpdateTalents = function()
+        InitTreeData()
         local tab = activeTab
         local tg  = TalentGroup()
 
         -- Spec state check
         local committed = GetCommittedSpec()
-        local specActive = committed or chosenSpecTab
+        local specActive = forceSpecSelection and nil or (committed or chosenSpecTab)
 
         if not specActive then
             -- No spec chosen — show spec choice overlay
@@ -1169,7 +1927,11 @@ else
             cancelBtn:Hide()
             classTreePanel:Hide()
             heroTreePanel:Hide()
+            heroTreePanel2:Hide()
+            heroChoiceOverlay:Hide()
+            chosenHeroTree = nil
             glyphFrame:Hide()
+            if buildBar then buildBar:Hide() end
             titleText:SetText("|cffffd100Choose Your Specialization|r")
             -- Show reset if player has legacy talents (no mastery)
             local totalPts = 0
@@ -1185,6 +1947,9 @@ else
             return
         end
 
+        local specTab = committed or chosenSpecTab
+        SyncChosenHeroTree(specTab)
+
         -- Spec active — hide overlay, show normal UI
         specOverlay:Hide()
         grid:Show()
@@ -1194,16 +1959,37 @@ else
         sep:Hide()
         sep2:Hide()
         classTreePanel:Show()
-        heroTreePanel:Show()
+        if chosenHeroTree then
+            heroChoiceOverlay:Hide()
+            if chosenHeroTree == 1 then
+                heroTreePanel:Show()
+                heroTreePanel2:Hide()
+            else
+                heroTreePanel:Hide()
+                heroTreePanel2:Show()
+            end
+        else
+            heroChoiceOverlay:Show()
+            RefreshHeroOverlay(specTab)
+            heroTreePanel:Hide()
+            heroTreePanel2:Hide()
+        end
         glyphFrame:Show()
+        if buildBar then buildBar:Show() end
         RefreshGlyphs()
 
-        local specTab = committed or chosenSpecTab
         activeTab = specTab  -- lock to chosen spec tree
         local tab = activeTab
         local specName = GetTalentTabInfo(specTab, false, false, tg)
+        local classPts = GetZonePoints(tab, "class", true)
+        local hero1Pts = GetZonePoints(tab, "hero1", true)
+        local hero2Pts = GetZonePoints(tab, "hero2", true)
         titleText:SetText("|cffffd100" ..
             (specName or "Unknown") .. "|r")
+
+        RefreshSidePanel(classTreePanel, tab, "class", "|cffaaaaccClass Tree " .. classPts .. "/" .. TREE_POINT_CAP .. "|r")
+        RefreshSidePanel(heroTreePanel, tab, "hero1", "|cffaaaaccHero Tree 1 " .. hero1Pts .. "/" .. TREE_POINT_CAP .. "|r")
+        RefreshSidePanel(heroTreePanel2, tab, "hero2", "|cffaaaaccHero Tree 2 " .. hero2Pts .. "/" .. TREE_POINT_CAP .. "|r")
 
         -- Tabs — hide all (player is locked to one spec)
         for i, tb in ipairs(tabBtns) do
@@ -1211,17 +1997,16 @@ else
         end
 
         -- Unspent
-        local usp = GetUnspentTalentPoints(false, false, tg) or 0
+        local baseUnspent = tonumber(ST_unspent) or 0
         local previewSpent = 0
         if previewMode then
             previewSpent = GetGroupPreviewTalentPointsSpent(false, tg) or 0
         end
-        local effectiveUnspent = usp - previewSpent
+        local effectiveUnspent = baseUnspent - previewSpent
         if previewMode and previewSpent > 0 then
-            unspentText:SetText("Unspent: |cffffd100" .. effectiveUnspent ..
-                "|r  (|cffff8800" .. previewSpent .. " queued|r)")
+            unspentText:SetText("Unspent: |cffffd100" .. effectiveUnspent .. "|r")
         else
-            unspentText:SetText("Unspent: |cffffd100" .. usp .. "|r")
+            unspentText:SetText("Unspent: |cffffd100" .. baseUnspent .. "|r")
         end
 
         -- Hide the whole pool
@@ -1229,6 +2014,50 @@ else
 
         -- Populate active tab (skip talent #1 = mastery)
         local num = GetNumTalents(tab) or 0
+
+        -- Auto-size grid to fit all display positions (uses coord table)
+        local maxR, maxC = 0, 0
+        for i = 2, math.min(num, MAX_BTNS) do
+            local r, c = TalentPos(tab, i)
+            local isSpecCell = r and c and (c > SPEC_COL_START and c <= (SPEC_COL_START + SPEC_COLS))
+            if isSpecCell then
+                local specCol = c - SPEC_COL_START
+                maxR = math.max(maxR, r)
+                maxC = math.max(maxC, specCol)
+            end
+        end
+
+        -- Dynamically scale spacing if grid would be too wide for the frame
+        local sidePanelWidth = 164  -- approximate width of each side panel + margin
+        local availWidth = CFG.FRAME_W - 40  -- 20px margin each side
+        local neededW = maxC * CFG.SPACING_X + CFG.BTN_SIZE
+        local spacingX = CFG.SPACING_X
+        local showSidePanels = true
+
+        if neededW > availWidth then
+            -- Keep side panels visible and compress spec grid spacing as needed.
+            spacingX = math.max(36, math.floor((availWidth - CFG.BTN_SIZE) / math.max(maxC, 1)))
+        end
+
+        -- Show/hide side panels based on grid width
+        if showSidePanels then
+            classTreePanel:Show()
+            if chosenHeroTree == 1 then heroTreePanel:Show()
+            elseif chosenHeroTree == 2 then heroTreePanel2:Show()
+            else
+                heroTreePanel:Hide()
+                heroTreePanel2:Hide()
+            end
+        else
+            classTreePanel:Hide()
+            heroTreePanel:Hide()
+            heroTreePanel2:Hide()
+        end
+
+        local gridW = math.max(500, maxC * spacingX + CFG.BTN_SIZE)
+        local gridH = math.max(510, maxR * CFG.SPACING_Y + CFG.BTN_SIZE)
+        grid:SetSize(gridW, gridH)
+
         for i = 2, math.min(num, MAX_BTNS) do
             local name, iconTex, tier, col, rank, maxRank,
                   isExcept, avail, previewRank, previewAvail =
@@ -1255,8 +2084,13 @@ else
 
                 -- Position
                 local r, c  = TalentPos(tab, i)
-                btn:ClearAllPoints()
-                if btn.choiceSwap then btn.choiceSwap:Hide() end
+                local isSpecCell = r and c and (c > SPEC_COL_START and c <= (SPEC_COL_START + SPEC_COLS))
+                if not isSpecCell then
+                    btn:Hide()
+                else
+                    local specCol = c - SPEC_COL_START
+                    btn:ClearAllPoints()
+                    if btn.choiceSwap then btn.choiceSwap:Hide() end
 
                 -- Determine if this choice pair is resolved
                 local choiceResolved = false
@@ -1287,7 +2121,7 @@ else
                     -- UNRESOLVED: show both at half-width, side by side
                     local halfW = math.floor(CFG.BTN_SIZE / 2) - 1
                     btn:SetSize(halfW, CFG.BTN_SIZE)
-                    local cellX = (c - 1) * CFG.SPACING_X
+                    local cellX = (specCol - 1) * spacingX
                     local cellY = -((r - 1) * CFG.SPACING_Y)
                     if isRight then
                         btn:SetPoint("TOPLEFT", grid, "TOPLEFT",
@@ -1303,7 +2137,7 @@ else
                     -- Normal talent OR resolved choice winner: full size
                     btn:SetSize(CFG.BTN_SIZE, CFG.BTN_SIZE)
                     btn:SetPoint("TOPLEFT", grid, "TOPLEFT",
-                        (c - 1) * CFG.SPACING_X,
+                        (specCol - 1) * spacingX,
                         -((r - 1) * CFG.SPACING_Y))
                     btn.icon:SetPoint("TOPLEFT", 2, -2)
                     btn.icon:SetPoint("BOTTOMRIGHT", -2, 2)
@@ -1378,6 +2212,7 @@ else
                 end
 
                 btn:Show()
+                end -- close isSpecCell guard
                 end -- close choice loser guard
                 end -- close choiceBlock guard
             end
@@ -1466,7 +2301,12 @@ else
         "BOTTOMRIGHT", -16, 8)
     resetBtn.text:SetText("Reset Talents")
     resetBtn:SetScript("OnClick", function()
+        if ST_waitingForServer then
+            PushTalentFeedback("Waiting for server reply...")
+            return
+        end
         -- Ask server for reset cost
+        SetServerWait(true, "reset-cost")
         AIO.Handle("SurrealTalents", "GetResetCost")
     end)
 
@@ -1476,6 +2316,7 @@ else
         button1 = "Reset",
         button2 = "Cancel",
         OnAccept = function()
+            SetServerWait(true, "reset")
             AIO.Handle("SurrealTalents", "ConfirmReset")
         end,
         timeout = 0,
@@ -1501,15 +2342,59 @@ else
 
     -- Server → Client: show reset cost dialog
     function ClientHandlers.ShowResetCost(player, cost)
+        SetServerWait(false)
         resetCostCache = cost
         StaticPopup_Show("SURREAL_TALENT_RESET", GoldStr(cost))
     end
 
-    -- Server → Client: reset completed
-    function ClientHandlers.ResetDone(player, newCost)
+    -- Server → Client: reset completed  
+    function ClientHandlers.ResetDone(player, newCost, talents, spent, maxPts, unspent, tabInfo)
+        DebugTalent("ResetDone received")
+        SetServerWait(false)
         resetCostCache = newCost
+        if talents then
+            ST_playerTalents = talents
+            ST_spent = spent or 0
+            ST_maxPoints = maxPts or 0
+            ST_unspent = unspent or 0
+            ST_tabPointInfo = tabInfo or {}
+            ST_dataReady = true
+        else
+            ST_playerTalents = {}
+            ST_spent = 0
+            ST_unspent = tonumber(BlizzardGetUnspentTalentPoints and BlizzardGetUnspentTalentPoints() or 0) or 0
+            ST_maxPoints = ST_unspent
+            ST_tabPointInfo = {}
+            ST_dataReady = true
+        end
+        ST_previewPoints = {}
+        ST_previewSpent = 0
+        forceSpecSelection = true
         chosenSpecTab = nil  -- talents reset, back to spec choice
+        chosenHeroTree = nil
         UpdateTalents()
+        RequestTalentsFromServer()
+        ScheduleTalentRefresh(0.6)
+    end
+
+    -- Server → Client: receive full talent state
+    function ClientHandlers.ReceiveTalents(player, talents, spent, maxPts, unspent, tabInfo)
+        DebugTalent("ReceiveTalents spent=" .. tostring(spent or 0) .. " unspent=" .. tostring(unspent or 0))
+        SetServerWait(false)
+        InitTreeData()  -- ensure tree data is built
+        ST_playerTalents = talents or {}
+        ST_spent = spent or 0
+        ST_maxPoints = maxPts or 0
+        ST_unspent = unspent or 0
+        ST_tabPointInfo = tabInfo or {}
+        ST_previewPoints = {}
+        ST_previewSpent = 0
+        ST_dataReady = true
+        if UpdateTalents then UpdateTalents() end
+    end
+
+    function ClientHandlers.Debug(player, msg)
+        DebugTalent("Server: " .. tostring(msg))
     end
 
     -- Server → Client: glyph applied/removed, refresh display
@@ -1533,6 +2418,13 @@ else
             cancelBtn:Hide()
             return
         end
+
+        if ST_waitingForServer then
+            applyBtn:Show()
+            cancelBtn:Hide()
+            return
+        end
+
         local queued = GetGroupPreviewTalentPointsSpent(false, TalentGroup()) or 0
         if queued > 0 then
             applyBtn:Show()
@@ -1540,6 +2432,342 @@ else
         else
             applyBtn:Hide()
             cancelBtn:Hide()
+        end
+    end
+
+    -- =================================================================
+    --  B U I L D   B A R  (import / export / saved builds)
+    -- =================================================================
+
+    -- Persistent saved builds (per character, stored in WTF folder)
+    SurrealUI_TalentBuilds = SurrealUI_TalentBuilds or {}
+    if AIO.AddSavedVarChar then
+        AIO.AddSavedVarChar("SurrealUI_TalentBuilds")
+    end
+
+    -- Client-side talent string encoder (Wowhead format)
+    -- Starts at idx=2 to skip the mastery talent (idx 1), matching the
+    -- server's import which also skips mastery.
+    local function EncodeTalentString()
+        local tg = TalentGroup()
+        local trees = {}
+        for tab = 1, (GetNumTalentTabs() or 0) do
+            local digits = {}
+            for idx = 2, (GetNumTalents(tab) or 0) do
+                local name, _, _, _, rank =
+                    GetTalentInfo(tab, idx, false, false, tg)
+                if name then
+                    digits[#digits + 1] = tostring(rank or 0)
+                end
+            end
+            local str = table.concat(digits)
+            str = str:gsub("0+$", "")
+            if str == "" then str = "0" end
+            trees[#trees + 1] = str
+        end
+        return table.concat(trees, "-")
+    end
+
+    local RefreshBuildDropdown  -- forward declare
+
+    -- Build bar container (occupies the spec-tab row when spec is active)
+    buildBar = CreateFrame("Frame", nil, frame)
+    buildBar:SetSize(940, 28)
+    buildBar:SetPoint("BOTTOM", glyphFrame, "TOP", 0, 2)
+    buildBar:Hide()
+
+    -- Builds dropdown trigger
+    local buildsBtn = MakeButton("SurrealBuildsBtn", 90, buildBar,
+        "LEFT", 0, 0)
+    buildsBtn.text:SetText("Builds")
+
+    -- Talent string edit box (paste / export target)
+    local buildEditBox = CreateFrame("EditBox", "SurrealBuildEditBox",
+        buildBar)
+    buildEditBox:SetSize(520, 22)
+    buildEditBox:SetPoint("LEFT", buildsBtn, "RIGHT", 6, 0)
+    buildEditBox:SetFontObject(ChatFontNormal)
+    buildEditBox:SetAutoFocus(false)
+    buildEditBox:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    buildEditBox:SetBackdropColor(0.08, 0.08, 0.12, 0.9)
+    buildEditBox:SetBackdropBorderColor(0.35, 0.35, 0.40, 1)
+    buildEditBox:SetTextInsets(6, 6, 0, 0)
+    buildEditBox:SetScript("OnEscapePressed", function(self)
+        self:ClearFocus()
+    end)
+    buildEditBox:SetScript("OnEnterPressed", function(self)
+        self:ClearFocus()
+    end)
+
+    -- Export button
+    local bExport = MakeButton("SurrealBuildExport", 58, buildBar,
+        "LEFT", 0, 0)
+    bExport:ClearAllPoints()
+    bExport:SetPoint("LEFT", buildEditBox, "RIGHT", 4, 0)
+    bExport.text:SetText("|cffffd100Export|r")
+    bExport:SetScript("OnClick", function()
+        local str = EncodeTalentString()
+        buildEditBox:SetText(str)
+        buildEditBox:HighlightText()
+        buildEditBox:SetFocus()
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ff00[SurrealUI]|r Build exported — Ctrl+C to copy.")
+    end)
+
+    -- Import button
+    local bImport = MakeButton("SurrealBuildImport", 58, buildBar,
+        "LEFT", 0, 0)
+    bImport:ClearAllPoints()
+    bImport:SetPoint("LEFT", bExport, "RIGHT", 4, 0)
+    bImport.text:SetText("|cff00cc00Import|r")
+    bImport:SetScript("OnClick", function()
+        local str = buildEditBox:GetText()
+        if not str or str == "" then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cffff0000[SurrealUI]|r Paste a talent string first.")
+            return
+        end
+        buildEditBox:ClearFocus()
+        StaticPopupDialogs["SURREAL_BUILD_IMPORT"] = {
+            text = "Import and apply this build?\n\n|cffffd100"
+                .. str .. "|r\n\nThis will reset your talents.",
+            button1 = "Apply",
+            button2 = "Cancel",
+            OnAccept = function()
+                AIO.Handle("SurrealTalents", "ImportTalents", str)
+            end,
+            timeout = 0,
+            whileDead = false,
+            hideOnEscape = true,
+            preferredIndex = 3,
+        }
+        StaticPopup_Show("SURREAL_BUILD_IMPORT")
+    end)
+
+    -- Save button
+    local bSave = MakeButton("SurrealBuildSave", 50, buildBar,
+        "LEFT", 0, 0)
+    bSave:ClearAllPoints()
+    bSave:SetPoint("LEFT", bImport, "RIGHT", 4, 0)
+    bSave.text:SetText("|cff88ccffSave|r")
+    bSave:SetScript("OnClick", function()
+        local str = buildEditBox:GetText()
+        if not str or str == "" then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cffff0000[SurrealUI]|r Export or paste a build first.")
+            return
+        end
+        StaticPopupDialogs["SURREAL_BUILD_SAVE"] = {
+            text = "Name this build:",
+            button1 = "Save",
+            button2 = "Cancel",
+            hasEditBox = true,
+            OnAccept = function(self)
+                local name = self.editBox:GetText()
+                if name and name ~= "" then
+                    SurrealUI_TalentBuilds[name] = {
+                        string = str,
+                        class = select(2, UnitClass("player")),
+                        time = time(),
+                    }
+                    DEFAULT_CHAT_FRAME:AddMessage(
+                        "|cff00ff00[SurrealUI]|r Build '"
+                        .. name .. "' saved!")
+                    if RefreshBuildDropdown then
+                        RefreshBuildDropdown()
+                    end
+                end
+            end,
+            timeout = 0,
+            whileDead = true,
+            hideOnEscape = true,
+            preferredIndex = 3,
+        }
+        StaticPopup_Show("SURREAL_BUILD_SAVE")
+    end)
+
+    -- ── Builds Dropdown Popup ───────────────────────────────────────
+    local buildsPopup = CreateFrame("Frame", "SurrealBuildsPopup", frame)
+    buildsPopup:SetSize(260, 240)
+    buildsPopup:SetPoint("TOPLEFT", buildsBtn, "BOTTOMLEFT", 0, -2)
+    buildsPopup:SetFrameStrata("DIALOG")
+    buildsPopup:SetFrameLevel(frame:GetFrameLevel() + 20)
+    buildsPopup:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 14,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    buildsPopup:SetBackdropColor(0.08, 0.08, 0.10, 0.95)
+    buildsPopup:SetBackdropBorderColor(0.40, 0.40, 0.45, 1)
+    buildsPopup:Hide()
+
+    -- Close popup when build bar hides
+    buildBar:SetScript("OnHide", function()
+        buildsPopup:Hide()
+    end)
+
+    local popupTitle = buildsPopup:CreateFontString(nil, "OVERLAY",
+        "GameFontNormal")
+    popupTitle:SetPoint("TOP", 0, -8)
+    popupTitle:SetText("|cffffd100Saved Builds|r")
+
+    local buildScroll = CreateFrame("ScrollFrame",
+        "SurrealBuildsScroll", buildsPopup,
+        "UIPanelScrollFrameTemplate")
+    buildScroll:SetPoint("TOPLEFT", 8, -26)
+    buildScroll:SetPoint("BOTTOMRIGHT", -28, 8)
+    local buildContent = CreateFrame("Frame", nil, buildScroll)
+    buildContent:SetSize(210, 1)
+    buildScroll:SetScrollChild(buildContent)
+
+    local MAX_BUILD_BTNS = 20
+    local buildListBtns = {}
+    for bi = 1, MAX_BUILD_BTNS do
+        local bb = CreateFrame("Button", nil, buildContent)
+        bb:SetSize(205, 22)
+        bb:SetPoint("TOPLEFT", 0, -((bi - 1) * 24))
+
+        local bbBg = bb:CreateTexture(nil, "BACKGROUND")
+        bbBg:SetAllPoints()
+        bbBg:SetTexture(0.15, 0.15, 0.18, 0.6)
+
+        local bbText = bb:CreateFontString(nil, "OVERLAY",
+            "GameFontNormalSmall")
+        bbText:SetPoint("LEFT", 6, 0)
+        bbText:SetPoint("RIGHT", -26, 0)
+        bbText:SetJustifyH("LEFT")
+        bb.label = bbText
+
+        -- Delete (X) button
+        local del = CreateFrame("Button", nil, bb)
+        del:SetSize(16, 16)
+        del:SetPoint("RIGHT", -2, 0)
+        local delT = del:CreateFontString(nil, "OVERLAY",
+            "GameFontNormalSmall")
+        delT:SetPoint("CENTER")
+        delT:SetText("|cffff4444X|r")
+        del:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText("Delete build", 1, 0.3, 0.3)
+            GameTooltip:Show()
+        end)
+        del:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+        del:SetScript("OnClick", function()
+            if bb.buildName and SurrealUI_TalentBuilds then
+                SurrealUI_TalentBuilds[bb.buildName] = nil
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cff00ff00[SurrealUI]|r Deleted '"
+                    .. bb.buildName .. "'.")
+                if RefreshBuildDropdown then
+                    RefreshBuildDropdown()
+                end
+            end
+        end)
+        bb.delBtn = del
+
+        local hl = bb:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+        hl:SetBlendMode("ADD")
+        hl:SetAlpha(0.3)
+
+        bb:Hide()
+        bb.buildName   = nil
+        bb.buildString = nil
+
+        bb:SetScript("OnClick", function(self)
+            if self.buildString then
+                buildEditBox:SetText(self.buildString)
+                buildsPopup:Hide()
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cff00ff00[SurrealUI]|r Loaded: "
+                    .. (self.buildName or "?"))
+            end
+        end)
+        bb:SetScript("OnEnter", function(self)
+            if self.buildString then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetText(self.buildName or "",
+                    1, 0.82, 0)
+                GameTooltip:AddLine(self.buildString,
+                    0.7, 0.7, 0.7)
+                GameTooltip:Show()
+            end
+        end)
+        bb:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+        end)
+
+        buildListBtns[bi] = bb
+    end
+
+    -- Populate the saved-build list
+    RefreshBuildDropdown = function()
+        for bi = 1, MAX_BUILD_BTNS do
+            buildListBtns[bi]:Hide()
+        end
+        local idx = 0
+        local cls = select(2, UnitClass("player"))
+        for name, data in pairs(SurrealUI_TalentBuilds or {}) do
+            if not data.class or data.class == cls then
+                idx = idx + 1
+                if idx <= MAX_BUILD_BTNS then
+                    local bb = buildListBtns[idx]
+                    bb.buildName   = name
+                    bb.buildString = data.string or ""
+                    bb.label:SetText("|cffffd100" .. name .. "|r")
+                    bb.delBtn:Show()
+                    bb:Show()
+                end
+            end
+        end
+        buildContent:SetHeight(math.max(1, idx * 24))
+        if idx == 0 then
+            local bb = buildListBtns[1]
+            bb.buildName   = nil
+            bb.buildString = nil
+            bb.label:SetText("|cff888888No saved builds|r")
+            bb.delBtn:Hide()
+            bb:Show()
+            buildContent:SetHeight(24)
+        end
+    end
+
+    buildsBtn:SetScript("OnClick", function()
+        if buildsPopup:IsShown() then
+            buildsPopup:Hide()
+        else
+            RefreshBuildDropdown()
+            buildsPopup:Show()
+        end
+    end)
+
+    -- Server -> Client: talent import completed
+    function ClientHandlers.ImportResult(player, success, errMsg)
+        if success then
+            chosenSpecTab = nil
+            local refresher = CreateFrame("Frame")
+            refresher.elapsed = 0
+            refresher:SetScript("OnUpdate", function(self, dt)
+                self.elapsed = self.elapsed + dt
+                if self.elapsed > 0.5 then
+                    UpdateTalents()
+                    buildEditBox:SetText(EncodeTalentString())
+                    self:SetScript("OnUpdate", nil)
+                end
+            end)
+        else
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cffff0000[SurrealUI]|r "
+                .. (errMsg or "Import failed."))
         end
     end
 
@@ -1558,9 +2786,11 @@ else
         if self:IsShown() then UpdateTalents() end
     end)
     frame:SetScript("OnShow", function()
+        -- Request latest talent state from server
+        RequestTalentsFromServer()
         -- Clear stale preview state when opening
         if previewMode then
-            ResetGroupPreviewTalentPoints(false, TalentGroup())
+            ResetGroupPreviewTalentPoints()
         end
         chosenSpecTab = nil  -- reset spec preview on frame open
         UpdateTalents()
@@ -1662,6 +2892,11 @@ else
                 end)
             end
         end
+
+        if event == "PLAYER_ENTERING_WORLD" then
+            RequestTalentsFromServer()
+            ScheduleTalentRefresh(0.8)
+        end
     end)
 
     -- =================================================================
@@ -1682,13 +2917,8 @@ else
                     local name, _, tier, col, rank, maxRank =
                         GetTalentInfo(tab, idx)
                     if name then
-                        local ov = Override(tab, idx)
-                        local posStr = "tier=" .. tier .. " col=" .. col
-                        if ov then
-                            posStr = posStr ..
-                                "  |cffff8800-> override row=" ..
-                                ov[1] .. " col=" .. ov[2] .. "|r"
-                        end
+                            local posStr = "tier=" .. tier .. " col=" .. col ..
+                            "  (row " .. (tier + 1) .. ", col " .. (col + 1) .. ")"
                         DEFAULT_CHAT_FRAME:AddMessage(string.format(
                             "  |cffffd100[%2d]|r %-30s  %s  (%d/%d)",
                             idx, name, posStr, rank, maxRank))
