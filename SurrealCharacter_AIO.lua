@@ -48,6 +48,95 @@ else
     -- Enable the equipment manager CVar (safe no‑op if already set)
     pcall(function() SetCVar("equipmentManager", 1) end)
 
+    -- -----------------------------------------------------------------
+    --  I T E M   T O O L T I P   S T A T   R E M A P
+    -- -----------------------------------------------------------------
+    -- Shows only Surreal stat naming in item tooltips.
+    -- Any old stat type not implemented yet is replaced with a clear marker.
+    local ACTIVE_STAT_REMAP = {
+        ["defense rating"] = "haste",
+        ["dodge rating"] = "crit",
+        ["parry rating"] = "mastery",
+        ["block rating"] = "multistrike",
+        ["hit rating"] = "versatility",
+    }
+
+    local UNIMPLEMENTED_STATS = {
+        { token = "resilience rating", label = "Resilience" },
+        { token = "resilience", label = "Resilience" },
+        { token = "expertise rating", label = "Expertise" },
+        { token = "armor penetration rating", label = "Armor Penetration" },
+        { token = "crit rating", label = "Crit Rating" },
+        { token = "haste rating", label = "Haste Rating" },
+        { token = "spell penetration", label = "Spell Penetration" },
+        { token = "block value", label = "Block Value" },
+        { token = "mana regeneration", label = "Mana Regeneration" },
+        { token = "health regeneration", label = "Health Regeneration" },
+        { token = "hit avoidance", label = "Hit Avoidance" },
+        { token = "crit avoidance", label = "Crit Avoidance" },
+    }
+
+    local function ReplaceCaseInsensitive(sourceText, findText, replaceText)
+        local out = sourceText
+        local lowerOut = string.lower(out)
+        local startPos, endPos = string.find(lowerOut, findText, 1, true)
+        while startPos do
+            out = string.sub(out, 1, startPos - 1) .. replaceText .. string.sub(out, endPos + 1)
+            lowerOut = string.lower(out)
+            startPos, endPos = string.find(lowerOut, findText, 1, true)
+        end
+        return out
+    end
+
+    local function RemapItemStatTooltipLine(lineText)
+        if not lineText or lineText == "" then return lineText end
+        local lower = string.lower(lineText)
+
+        for _, unimpl in ipairs(UNIMPLEMENTED_STATS) do
+            if string.find(lower, unimpl.token, 1, true) then
+                local amount = string.match(lineText, "by%s+([%+%-]?%d+)")
+                    or string.match(lineText, "([%+%-]?%d+)")
+                if amount then
+                    return string.format("Equip: Not yet implemented (%s: %s)", unimpl.label, amount)
+                end
+                return string.format("Not yet implemented (%s)", unimpl.label)
+            end
+        end
+
+        local remapped = lineText
+        for oldText, newText in pairs(ACTIVE_STAT_REMAP) do
+            if string.find(string.lower(remapped), oldText, 1, true) then
+                remapped = ReplaceCaseInsensitive(remapped, oldText, newText)
+            end
+        end
+
+        return remapped
+    end
+
+    local function SurrealCharacter_RemapTooltipStats(tooltip)
+        if not tooltip or not tooltip.GetName then return end
+        local tooltipName = tooltip:GetName()
+        if not tooltipName then return end
+
+        for i = 1, tooltip:NumLines() do
+            local leftLine = _G[tooltipName .. "TextLeft" .. i]
+            if leftLine then
+                local original = leftLine:GetText()
+                if original and original ~= "" then
+                    local remapped = RemapItemStatTooltipLine(original)
+                    if remapped ~= original then
+                        leftLine:SetText(remapped)
+                    end
+                end
+            end
+        end
+    end
+
+    GameTooltip:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
+    ItemRefTooltip:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
+    ShoppingTooltip1:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
+    ShoppingTooltip2:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
+
     -- Table of title IDs the server confirmed this character has
     local knownTitleIDs = {}
 

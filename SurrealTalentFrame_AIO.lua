@@ -790,6 +790,25 @@ else
     sep:SetPoint("TOPRIGHT", -10, -36)
     sep:SetHeight(1)
 
+    local unspentText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    unspentText:SetPoint("TOPLEFT", 16, -58)
+    unspentText:SetJustifyH("LEFT")
+    unspentText:SetText("Unspent: |cffffd1000|r")
+
+    local distText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    distText:SetPoint("TOPRIGHT", -16, -58)
+    distText:SetJustifyH("RIGHT")
+    distText:SetText("")
+    distText:Hide()
+
+    local sep2 = frame:CreateTexture(nil, "ARTWORK")
+    sep2:SetTexture(0.40, 0.40, 0.45)
+    sep2:SetAlpha(0.25)
+    sep2:SetPoint("TOPLEFT", 10, -76)
+    sep2:SetPoint("TOPRIGHT", -10, -76)
+    sep2:SetHeight(1)
+    sep2:Hide()
+
     -- =================================================================
     --  S P E C   T A B S
     -- =================================================================
@@ -858,35 +877,8 @@ else
         tb:SetScript("OnClick", function()
             SelectTab(tabIdx)
         end)
-
         tabBtns[i] = tb
     end
-
-    -- =================================================================
-    --  I N F O   B A R
-    -- =================================================================
-    local unspentText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    unspentText:SetPoint("TOPRIGHT", -16, -44)
-
-    -- Distribution string (e.g. "20 / 51 / 0")
-    local distText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    distText:SetPoint("BOTTOM", 0, 14)
-
-    -- Bottom separator
-    local sep2 = frame:CreateTexture(nil, "ARTWORK")
-    sep2:SetTexture(0.40, 0.40, 0.45)
-    sep2:SetAlpha(0.35)
-    sep2:SetPoint("BOTTOMLEFT", 10, 36)
-    sep2:SetPoint("BOTTOMRIGHT", -10, 36)
-    sep2:SetHeight(1)
-
-    -- =================================================================
-    --  G R I D   C O N T A I N E R  (centre — spec talents)
-    -- =================================================================
-    local grid = CreateFrame("Frame", nil, frame)
-    grid:SetSize(500, 510)
-    grid:SetPoint("CENTER", 0, 10)
-
     -- =================================================================
     --  S I D E   P A N E L S  (Class Tree + Hero Tree 1 + Hero Tree 2)
     -- =================================================================
@@ -947,6 +939,14 @@ else
                             LearnTalent(self.tTab, self.tIdx)
                         end
                     end
+                end)
+                s:SetScript("OnEnter", function(self)
+                    if ShowTalentTooltip then
+                        ShowTalentTooltip(self, "ANCHOR_RIGHT")
+                    end
+                end)
+                s:SetScript("OnLeave", function()
+                    GameTooltip:Hide()
                 end)
 
                 p.slots[#p.slots + 1] = s
@@ -1133,6 +1133,101 @@ else
                 hb.entryIcon:SetAlpha(0.35)
             end
         end
+    end
+
+    local function ResolveTooltipSpell(def, rank)
+        if type(def) ~= "table" or type(def.spells) ~= "table" then
+            return nil
+        end
+
+        local wantedRank = math.max(tonumber(rank) or 0, 1)
+        local spellId = def.spells[wantedRank]
+        if spellId then
+            return spellId
+        end
+
+        local bestSpell = nil
+        for r, sid in ipairs(def.spells) do
+            if sid and r <= wantedRank then
+                bestSpell = sid
+            end
+        end
+
+        return bestSpell or def.spells[1]
+    end
+
+    function ShowTalentTooltip(button, anchor)
+        if not button or not button.tTab or not button.tIdx then
+            return
+        end
+
+        local tab = button.tTab
+        local idx = button.tIdx
+        local tName, _, _, _, tRank, tMax, _, _, previewRank = GetTalentInfo(tab, idx)
+        local ord = ST_orderedTalents[tab]
+        local def = ord and ord[idx] and ord[idx].def
+
+        local baseRank = tonumber(tRank) or 0
+        local displayRank = baseRank
+        if previewMode and previewRank and tonumber(previewRank) and tonumber(previewRank) > displayRank then
+            displayRank = tonumber(previewRank)
+        end
+
+        local currentSpell = ResolveTooltipSpell(def, displayRank)
+        local nextSpell = nil
+        if (tonumber(tMax) or 0) > displayRank then
+            nextSpell = ResolveTooltipSpell(def, displayRank + 1)
+        end
+
+        GameTooltip:SetOwner(button, anchor or "ANCHOR_RIGHT")
+        GameTooltip:ClearLines()
+
+        local hasSpellHeader = false
+        if currentSpell and GameTooltip.SetHyperlink then
+            pcall(GameTooltip.SetHyperlink, GameTooltip, "spell:" .. tostring(currentSpell))
+            hasSpellHeader = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText() and GameTooltipTextLeft1:GetText() ~= ""
+        end
+        if (not hasSpellHeader) and currentSpell and GameTooltip.SetSpellByID then
+            pcall(GameTooltip.SetSpellByID, GameTooltip, currentSpell)
+            hasSpellHeader = GameTooltipTextLeft1 and GameTooltipTextLeft1:GetText() and GameTooltipTextLeft1:GetText() ~= ""
+        end
+
+        if not hasSpellHeader then
+            GameTooltip:ClearLines()
+            GameTooltip:AddLine(tName or ("Talent " .. tostring(idx)), 1, 1, 1)
+            if currentSpell then
+                local curDesc = (GetSpellDescription and GetSpellDescription(currentSpell)) or select(2, GetSpellInfo(currentSpell))
+                if curDesc and curDesc ~= "" then
+                    GameTooltip:AddLine(" ")
+                    GameTooltip:AddLine(curDesc, 1, 1, 1, true)
+                end
+            end
+        end
+
+        GameTooltip:AddLine(" ")
+        if previewMode and displayRank ~= baseRank then
+            GameTooltip:AddLine(string.format("Preview Rank %d/%d (current %d/%d)", displayRank, tMax or 0, baseRank, tMax or 0), 0.2, 1, 0.2)
+        else
+            GameTooltip:AddLine(string.format("Rank %d/%d", displayRank, tMax or 0), 1, 0.82, 0)
+        end
+
+        if nextSpell then
+            local nextDesc = (GetSpellDescription and GetSpellDescription(nextSpell)) or select(2, GetSpellInfo(nextSpell))
+            if nextDesc and nextDesc ~= "" then
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine("|cff00ff00Next rank:|r", 0, 1, 0)
+                GameTooltip:AddLine(nextDesc, 1, 1, 1, true)
+            end
+        end
+
+        local partner = ChoicePartner(tab, idx)
+        if partner then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("|cffaaaacc\226\151\134 Choice Node|r")
+            GameTooltip:AddLine("|cff888888Click to choose this talent|r")
+        end
+
+        GameTooltip:Show()
     end
 
     local function RefreshSidePanel(panel, tab, zoneName, titleText)
@@ -1726,6 +1821,12 @@ else
         end
     end
 
+    -- Talent grid canvas (parent for talent buttons)
+    local grid = CreateFrame("Frame", nil, frame)
+    grid:SetPoint("TOP", frame, "TOP", 0, -90)
+    grid:SetSize(500, 510)
+    grid:Show()
+
     -- =================================================================
     --  T A L E N T   B U T T O N   P O O L
     -- =================================================================
@@ -1851,47 +1952,7 @@ else
 
         -- Tooltip
         btn:SetScript("OnEnter", function(self)
-            if self.tTab and self.tIdx then
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                -- Manual tooltip (SetTalent uses native data, won't match custom)
-                local tName, tIcon, _, _, tRank, tMax = GetTalentInfo(self.tTab, self.tIdx)
-                if tName then
-                    GameTooltip:AddLine(tName, 1, 1, 1)
-                    GameTooltip:AddLine(string.format("Rank %d/%d", tRank, tMax), 1, 0.82, 0)
-                    -- Show spell description from current/next rank
-                    local ord = ST_orderedTalents[self.tTab]
-                    if ord and ord[self.tIdx] then
-                        local def = ord[self.tIdx].def
-                        local curSpell = def.spells[math.max(tRank, 1)]
-                        if curSpell then
-                            local desc = GetSpellDescription and GetSpellDescription(curSpell)
-                                or select(2, GetSpellInfo(curSpell))
-                            if desc and desc ~= "" then
-                                GameTooltip:AddLine(" ")
-                                GameTooltip:AddLine(desc, 1, 1, 1, true)
-                            end
-                        end
-                        -- Show next rank if not maxed
-                        if tRank < tMax and def.spells[tRank + 1] then
-                            local nextSp = def.spells[tRank + 1]
-                            local nDesc = GetSpellDescription and GetSpellDescription(nextSp)
-                                or select(2, GetSpellInfo(nextSp))
-                            if nDesc and nDesc ~= "" then
-                                GameTooltip:AddLine(" ")
-                                GameTooltip:AddLine("|cff00ff00Next rank:|r", 0, 1, 0)
-                                GameTooltip:AddLine(nDesc, 1, 1, 1, true)
-                            end
-                        end
-                    end
-                end
-                local partner = ChoicePartner(self.tTab, self.tIdx)
-                if partner then
-                    GameTooltip:AddLine(" ")
-                    GameTooltip:AddLine("|cffaaaacc\226\151\134 Choice Node|r")
-                    GameTooltip:AddLine("|cff888888Click to choose this talent|r")
-                end
-                GameTooltip:Show()
-            end
+            ShowTalentTooltip(self, "ANCHOR_RIGHT")
         end)
         btn:SetScript("OnLeave", function()
             GameTooltip:Hide()
