@@ -110,6 +110,11 @@ else
             end
         end
 
+        remapped = ReplaceCaseInsensitive(remapped, "shield multistrike", "multistrike")
+        remapped = ReplaceCaseInsensitive(remapped, "melee versatility", "versatility")
+        remapped = ReplaceCaseInsensitive(remapped, "ranged versatility", "versatility")
+        remapped = ReplaceCaseInsensitive(remapped, "spell versatility", "versatility")
+
         return remapped
     end
 
@@ -136,6 +141,39 @@ else
     ItemRefTooltip:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
     ShoppingTooltip1:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
     ShoppingTooltip2:HookScript("OnTooltipSetItem", SurrealCharacter_RemapTooltipStats)
+
+    local StatScanTooltip = CreateFrame("GameTooltip", "SurrealCharacterStatScanTooltip", nil, "GameTooltipTemplate")
+    StatScanTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+
+    local function GetEquippedTooltipRating(token)
+        local total = 0
+
+        for slot = 1, 19 do
+            StatScanTooltip:ClearLines()
+            if StatScanTooltip:SetInventoryItem("player", slot) then
+                local lineCount = StatScanTooltip:NumLines() or 0
+                for i = 2, lineCount do
+                    local leftLine = _G["SurrealCharacterStatScanTooltipTextLeft" .. i]
+                    if leftLine then
+                        local text = leftLine:GetText()
+                        if text and text ~= "" then
+                            local remapped = RemapItemStatTooltipLine(text)
+                            local lower = string.lower(remapped)
+                            if string.find(lower, token, 1, true) then
+                                local amount = string.match(remapped, "by%s+([%+%-]?%d+)")
+                                    or string.match(remapped, "([%+%-]?%d+)")
+                                if amount then
+                                    total = total + (tonumber(amount) or 0)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        return total
+    end
 
     -- Table of title IDs the server confirmed this character has
     local knownTitleIDs = {}
@@ -828,6 +866,104 @@ else
     local leftCol  = CreateStatColumn(statsPanel, 8,   "Base Stats")
     local rightCol = CreateStatColumn(statsPanel, 218, "Melee")
 
+    local SPELL_DK_FROST_PRESENCE = 48263
+    local SPELL_PAL_RIGHTEOUS_FURY = 25780
+    local TANK_PASSIVE_PARRY_CAP_RATING = 200 -- 20% at 10 rating per 1%
+    local TANK_PASSIVE_DODGE_CAP_RATING = 200 -- 20% at 10 rating per 1%
+
+    local function HasPlayerAuraBySpellId(spellId)
+        local spellName = GetSpellInfo(spellId)
+        if not spellName then return false end
+        return UnitBuff("player", spellName) ~= nil
+    end
+
+    local function GetTankPassiveStateText()
+        local _, classToken = UnitClass("player")
+        local form = GetShapeshiftForm and GetShapeshiftForm() or 0
+
+        if classToken == "DEATHKNIGHT" then
+            local active = HasPlayerAuraBySpellId(SPELL_DK_FROST_PRESENCE)
+            return active, active and "Active (Frost Presence)" or "Inactive (requires Frost Presence)"
+        elseif classToken == "DRUID" then
+            local active = (form == FORM_BEAR or form == FORM_DIREBEAR)
+            return active, active and "Active (Bear Form)" or "Inactive (requires Bear Form)"
+        elseif classToken == "PALADIN" then
+            local active = HasPlayerAuraBySpellId(SPELL_PAL_RIGHTEOUS_FURY)
+            return active, active and "Active (Righteous Fury)" or "Inactive (requires Righteous Fury)"
+        elseif classToken == "WARRIOR" then
+            local active = (form == FORM_DEFENSIVESTANCE)
+            return active, active and "Active (Defensive Stance)" or "Inactive (requires Defensive Stance)"
+        end
+
+        return false, "Inactive (tank passive only applies to DK/Druid/Paladin/Warrior)"
+    end
+
+    local function GetPlayerClassAndSpecIndex()
+        local _, classToken = UnitClass("player")
+        local specIndex = nil
+        if GetPrimaryTalentTree then
+            specIndex = GetPrimaryTalentTree()
+        end
+        return classToken, specIndex
+    end
+
+    local function BuildMasteryTooltipText(maPct)
+        local classToken, specIndex = GetPlayerClassAndSpecIndex()
+        local masteryMul = 1 + (maPct / 100)
+
+        if classToken == "WARLOCK" then
+            local specNames = { "Affliction", "Demonology", "Destruction" }
+            local specName = specNames[specIndex or 0] or "Unknown"
+            return format(
+                "Your mastery increases Warlock pet and guardian damage.\nBaseline: 100%% pet/guardian damage\nMastery Bonus: +%.1f%%%%\nFinal: 100%%%% + %.1f%%%% = %.1f%%%% (x%.3f)\nSpec: %s",
+                maPct, maPct, 100 + maPct, masteryMul, specName
+            )
+        end
+
+        if classToken == "DEATHKNIGHT" then
+            if specIndex == 1 then
+                return format(
+                    "Blood mastery increases Death Strike healing and Blood Barrier shielding.\nBaseline Heal: max(50%%%% of damage taken in last 5s, 10%%%% max HP)\nBaseline Shield: 50%%%% of Death Strike heal\nMastery Bonus: +%.1f%%%%\nFinal heal & shield multiplier: x%.3f",
+                    maPct, masteryMul
+                )
+            end
+            return format(
+                "Blood DK mastery scaling is active for Death Strike heal + shield.\nCurrent spec does not use this custom mastery hook.\nCurrent mastery: %.1f%%%% (x%.3f)",
+                maPct, masteryMul
+            )
+        end
+
+        if classToken == "PALADIN" then
+            if specIndex == 1 then
+                return format(
+                    "Holy mastery increases Beacon of Light transfer amounts.\nBaseline Damage Funnel: 50%%%% damage heal per target (2 targets)\nBaseline Direct-Heal Duplicate: 100%%%% heal per target (5 targets, excluding original)\nMastery Bonus: +%.1f%%%%\nFinal Beacon transfer multiplier: x%.3f",
+                    maPct, masteryMul
+                )
+            end
+            return format(
+                "Holy Paladin mastery scaling is active for Beacon transfers.\nCurrent spec does not use this custom mastery hook.\nCurrent mastery: %.1f%%%% (x%.3f)",
+                maPct, masteryMul
+            )
+        end
+
+        if classToken == "PRIEST" then
+            local specNames = { "Discipline", "Holy", "Shadow" }
+            local specName = specNames[specIndex or 0] or "Unknown"
+            local baseTransferPct = 25.0
+            local finalTransferPct = baseTransferPct + maPct
+            local baseExtensionSec = 0.2
+            local finalExtensionSec = baseExtensionSec * masteryMul
+            return format(
+                "Shadow mastery increases Psychic Link output.\nBaseline Transfer: %.1f%%%%\nMastery Bonus: +%.1f%%%%\nFinal Transfer: %.1f%%%%\n\nBaseline DoT Extension: %.3fs per proc\nMastery-scaled Extension: %.3fs per proc\n\nSpec: %s",
+                baseTransferPct, maPct, finalTransferPct,
+                baseExtensionSec, finalExtensionSec,
+                specName
+            )
+        end
+
+        return format("%.1f%%%% Mastery (class-specific effect)", maPct)
+    end
+
     -- ---- helper: fill secondary rating stats into row array ---------------
     local function SetSecondaryStats(rows, startIdx)
         -- Crit (dodge rating)
@@ -839,17 +975,25 @@ else
             if c < sCrit then sCrit = c end
         end
         local dodgeR = GetCombatRating(CR_DODGE) or 0
+        if dodgeR <= 0 then
+            dodgeR = GetEquippedTooltipRating("crit")
+        end
         local critDmg = dodgeR / 5
         local sf = rows[startIdx]
         sf.label:SetText("Crit:")
         sf.value:SetText(format("%.1f%%", mCrit))
         sf.value:SetTextColor(1,1,1)
         sf.tipTitle = format("Crit: %d Rating", dodgeR)
-        sf.tipText  = format("%.2f%% Melee Crit\n%.2f%% Ranged Crit\n%.2f%% Spell Crit\n+%.1f%% Crit Damage Bonus",
-            mCrit, rCrit, sCrit, critDmg)
+        local tankActive, tankState = GetTankPassiveStateText()
+        local parryFromCrit = tankActive and min(dodgeR, TANK_PASSIVE_PARRY_CAP_RATING) or 0
+        sf.tipText  = format("%.2f%% Melee Crit\n%.2f%% Ranged Crit\n%.2f%% Spell Crit\n+%.1f%% Crit Damage Bonus\n\nTank Passive: Crit -> Parry Rating\nCurrent Bonus: +%d Parry Rating\nPassive Cap: +%d (20%%)\nState: %s",
+            mCrit, rCrit, sCrit, critDmg, parryFromCrit, TANK_PASSIVE_PARRY_CAP_RATING, tankState)
 
         -- Versatility (hit rating)
         local hitR = GetCombatRating(CR_HIT_MELEE) or 0
+        if hitR <= 0 then
+            hitR = GetEquippedTooltipRating("versatility")
+        end
         local vPct = hitR / 10
         sf = rows[startIdx + 1]
         sf.label:SetText("Versatility:")
@@ -861,6 +1005,9 @@ else
 
         -- Haste (defense rating)
         local defR = GetCombatRating(CR_DEFENSE_SKILL) or 0
+        if defR <= 0 then
+            defR = GetEquippedTooltipRating("haste")
+        end
         local mH = GetCombatRatingBonus(CR_HASTE_MELEE) or 0
         local rH = GetCombatRatingBonus(CR_HASTE_RANGED) or 0
         local sH = GetCombatRatingBonus(CR_HASTE_SPELL) or 0
@@ -874,24 +1021,32 @@ else
 
         -- Multistrike (block rating)
         local blkR = GetCombatRating(CR_BLOCK) or 0
+        if blkR <= 0 then
+            blkR = GetEquippedTooltipRating("multistrike")
+        end
         local msPct = blkR / 10
         sf = rows[startIdx + 3]
         sf.label:SetText("Multistrike:")
         sf.value:SetText(format("%.1f%%", msPct))
         sf.value:SetTextColor(1,1,1)
         sf.tipTitle = format("Multistrike: %d Rating", blkR)
-        sf.tipText  = format("%.1f%% chance to recast at 33%% effectiveness",
-            msPct)
+        local tankActiveMs, tankStateMs = GetTankPassiveStateText()
+        local dodgeFromMultistrike = tankActiveMs and min(blkR, TANK_PASSIVE_DODGE_CAP_RATING) or 0
+        sf.tipText  = format("%.1f%% chance to recast at 33%% effectiveness\n\nTank Passive: Multistrike -> Dodge Rating\nCurrent Bonus: +%d Dodge Rating\nPassive Cap: +%d (20%%)\nState: %s",
+            msPct, dodgeFromMultistrike, TANK_PASSIVE_DODGE_CAP_RATING, tankStateMs)
 
         -- Mastery (parry rating)
         local parR = GetCombatRating(CR_PARRY) or 0
+        if parR <= 0 then
+            parR = GetEquippedTooltipRating("mastery")
+        end
         local maPct = parR / 10
         sf = rows[startIdx + 4]
         sf.label:SetText("Mastery:")
         sf.value:SetText(format("%.1f%%", maPct))
         sf.value:SetTextColor(1,1,1)
         sf.tipTitle = format("Mastery: %d Rating", parR)
-        sf.tipText  = format("%.1f%% Mastery (class-specific effect)", maPct)
+        sf.tipText  = BuildMasteryTooltipText(maPct)
     end
 
     -- ---- fill a column's rows based on its category -----------------------
@@ -929,7 +1084,20 @@ else
             rows[6].value:SetText(effective)
             rows[6].value:SetTextColor(1,1,1)
             rows[6].tipTitle = format("Armor: %d", effective)
-            rows[6].tipText  = format("Base Armor: %d", base)
+            local attackerLevel = UnitLevel("target") or UnitLevel("player") or 80
+            if attackerLevel < 1 then attackerLevel = 80 end
+            local reductionVsTarget = 0
+            local denomTarget = effective + 400 + 85 * attackerLevel
+            if denomTarget > 0 then
+                reductionVsTarget = (effective / denomTarget) * 100
+            end
+            local reductionVs83 = 0
+            local denom83 = effective + 400 + 85 * 83
+            if denom83 > 0 then
+                reductionVs83 = (effective / denom83) * 100
+            end
+            rows[6].tipText  = format("Base Armor: %d\nDamage Reduction vs L%d: %.2f%%\nDamage Reduction vs L83: %.2f%%",
+                base, attackerLevel, reductionVsTarget, reductionVs83)
 
         elseif cat == "Melee" then
             local b, p, n = UnitAttackPower("player")
@@ -1000,18 +1168,31 @@ else
             rows[1].tipText  = format("%d Health", sta * 10)
 
             local dodge = GetDodgeChance() or 0
+            local tankActiveDef, tankStateDef = GetTankPassiveStateText()
+            local blkRDef = GetCombatRating(CR_BLOCK) or 0
+            if blkRDef <= 0 then
+                blkRDef = GetEquippedTooltipRating("multistrike")
+            end
+            local dodgePassivePct = tankActiveDef and (min(blkRDef, TANK_PASSIVE_DODGE_CAP_RATING) / 10) or 0
+            local dodgeCombined = dodge + dodgePassivePct
             rows[2].label:SetText("Dodge:")
-            rows[2].value:SetText(format("%.2f%%", dodge))
+            rows[2].value:SetText(format("%.2f%%", dodgeCombined))
             rows[2].value:SetTextColor(1,1,1)
             rows[2].tipTitle = "Dodge"
-            rows[2].tipText  = format("%.2f%% chance to dodge", dodge)
+            rows[2].tipText  = format("Base: %.2f%%\nTank Passive: +%.2f%%\nCombined: %.2f%%\nState: %s", dodge, dodgePassivePct, dodgeCombined, tankStateDef)
 
             local parry = GetParryChance() or 0
+            local critRDef = GetCombatRating(CR_DODGE) or 0
+            if critRDef <= 0 then
+                critRDef = GetEquippedTooltipRating("crit")
+            end
+            local parryPassivePct = tankActiveDef and (min(critRDef, TANK_PASSIVE_PARRY_CAP_RATING) / 10) or 0
+            local parryCombined = parry + parryPassivePct
             rows[3].label:SetText("Parry:")
-            rows[3].value:SetText(format("%.2f%%", parry))
+            rows[3].value:SetText(format("%.2f%%", parryCombined))
             rows[3].value:SetTextColor(1,1,1)
             rows[3].tipTitle = "Parry"
-            rows[3].tipText  = format("%.2f%% chance to parry", parry)
+            rows[3].tipText  = format("Base: %.2f%%\nTank Passive: +%.2f%%\nCombined: %.2f%%\nState: %s", parry, parryPassivePct, parryCombined, tankStateDef)
 
             local block = GetBlockChance() or 0
             rows[4].label:SetText("Block:")
@@ -1035,7 +1216,20 @@ else
             rows[6].value:SetText(aEff)
             rows[6].value:SetTextColor(1,1,1)
             rows[6].tipTitle = format("Armor: %d", aEff)
-            rows[6].tipText  = format("Base Armor: %d", aBase)
+            local attackerLevel = UnitLevel("target") or UnitLevel("player") or 80
+            if attackerLevel < 1 then attackerLevel = 80 end
+            local reductionVsTarget = 0
+            local denomTarget = aEff + 400 + 85 * attackerLevel
+            if denomTarget > 0 then
+                reductionVsTarget = (aEff / denomTarget) * 100
+            end
+            local reductionVs83 = 0
+            local denom83 = aEff + 400 + 85 * 83
+            if denom83 > 0 then
+                reductionVs83 = (aEff / denom83) * 100
+            end
+            rows[6].tipText  = format("Base Armor: %d\nDamage Reduction vs L%d: %.2f%%\nDamage Reduction vs L83: %.2f%%",
+                aBase, attackerLevel, reductionVsTarget, reductionVs83)
         end
     end
 

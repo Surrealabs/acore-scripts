@@ -66,6 +66,14 @@ if AIO.AddAddon() then
             return "class=1"
         elseif catID == "QUEST" then
             return "class=12"
+        elseif catID == "ITEMSETS" then
+            return "itemset > 0"
+        elseif catID == "ITEMSETS_CLASS" then
+            return "itemset > 0 AND AllowableClass > 0"
+        elseif catID == "LEGENDARIES" then
+            return "Quality=5"
+        elseif catID == "CLASSSPEC" then
+            return "AllowableClass > 0"
         elseif catID == "MISC" then
             return "class=15"
         else
@@ -80,25 +88,104 @@ if AIO.AddAddon() then
         WARLOCK = 9, DRUID = 11,
     }
 
+    local CLASS_MASK = {
+        WARRIOR = 1,
+        PALADIN = 2,
+        HUNTER = 4,
+        ROGUE = 8,
+        PRIEST = 16,
+        DEATHKNIGHT = 32,
+        SHAMAN = 64,
+        MAGE = 128,
+        WARLOCK = 256,
+        DRUID = 1024,
+    }
+
+    local CLASS_ID_TO_MASK = {
+        [1] = 1,
+        [2] = 2,
+        [3] = 4,
+        [4] = 8,
+        [5] = 16,
+        [6] = 32,
+        [7] = 64,
+        [8] = 128,
+        [9] = 256,
+        [11] = 1024,
+    }
+
     -- Client requests a page of items
     function Handlers.Browse(player, catID, subCatID, page, search)
         page = page or 1
         if page < 1 then page = 1 end
+        local whereClause = nil
+        local playerClassMask = nil
+        if player and player.GetClass then
+            playerClassMask = CLASS_ID_TO_MASK[player:GetClass()]
+        end
 
         -- For glyphs, map class token to subclass
         local classFilter = nil
         if catID == "GLYPHS" and subCatID and GLYPH_SUBCLASS[subCatID] then
             classFilter = GLYPH_SUBCLASS[subCatID]
             subCatID = nil  -- clear so CategoryWhere uses classFilter
+        elseif catID == "CLASSSPEC" and subCatID and CLASS_MASK[subCatID] then
+            local classMask = CLASS_MASK[subCatID]
+            whereClause = "AllowableClass > 0 AND (AllowableClass & " .. classMask .. ") <> 0"
+            subCatID = nil
+        elseif catID == "ITEMSETS_CLASS" and subCatID and CLASS_MASK[subCatID] then
+            local classMask = CLASS_MASK[subCatID]
+            whereClause = "itemset > 0 AND AllowableClass > 0 AND (AllowableClass & " .. classMask .. ") <> 0"
+            subCatID = nil
         end
 
-        local whereClause = CategoryWhere(catID, subCatID, classFilter)
+        whereClause = whereClause or CategoryWhere(catID, subCatID, classFilter)
+
+        if catID == "ITEMSETS" and playerClassMask then
+            whereClause = whereClause ..
+                " AND (AllowableClass > 0 AND (AllowableClass & " .. playerClassMask .. ") <> 0)"
+        end
+
+        if catID == "ITEMSETS" and subCatID then
+            if subCatID == "T4_70" then
+                whereClause = whereClause .. " AND ItemLevel = 70"
+            elseif subCatID == "T5_79" then
+                whereClause = whereClause .. " AND ItemLevel = 79"
+            elseif subCatID == "T6_89" then
+                whereClause = whereClause .. " AND ItemLevel = 89"
+            elseif subCatID == "T7_99" then
+                whereClause = whereClause .. " AND ItemLevel = 99"
+            elseif subCatID == "T75_109" then
+                whereClause = whereClause .. " AND ItemLevel = 109"
+            elseif subCatID == "T8_129" then
+                whereClause = whereClause .. " AND ItemLevel = 129"
+            elseif subCatID == "T85_149" then
+                whereClause = whereClause .. " AND ItemLevel = 149"
+            elseif subCatID == "T9_159" then
+                whereClause = whereClause .. " AND ItemLevel = 159"
+            elseif subCatID == "T95_169" then
+                whereClause = whereClause .. " AND ItemLevel = 169"
+            elseif subCatID == "T10_179" then
+                whereClause = whereClause .. " AND ItemLevel = 179"
+            elseif subCatID == "T10S_199" then
+                whereClause = whereClause .. " AND ItemLevel = 199"
+            elseif subCatID == "T10_ALL" then
+                whereClause = whereClause .. " AND ItemLevel IN (179, 199)"
+            end
+        end
 
         -- Search filter
         if search and search ~= "" then
             -- Sanitize search
             local safe = search:gsub("'", ""):gsub('"', ""):gsub("\\", "")
-            whereClause = whereClause .. " AND name LIKE '%" .. safe .. "%'"
+            if catID == "ITEMSETS" then
+                whereClause = whereClause ..
+                    " AND (name LIKE '%" .. safe .. "%'" ..
+                    " OR itemset IN (SELECT entry FROM item_set_names" ..
+                    " WHERE name LIKE '%" .. safe .. "%'))"
+            else
+                whereClause = whereClause .. " AND name LIKE '%" .. safe .. "%'"
+            end
         end
 
         -- Count total
@@ -117,11 +204,16 @@ if AIO.AddAddon() then
 
         -- Fetch items
         local items = {}
+        local orderBy = " ORDER BY ItemLevel DESC, name ASC"
+        if catID == "ITEMSETS" or catID == "ITEMSETS_CLASS" then
+            orderBy = " ORDER BY itemset ASC, ItemLevel ASC, InventoryType ASC, name ASC"
+        end
+
         local q = WorldDBQuery(
             "SELECT entry, name, Quality, ItemLevel, RequiredLevel, " ..
-            "InventoryType, class, subclass " ..
+            "InventoryType, class, subclass, itemset " ..
             "FROM item_template WHERE " .. whereClause ..
-            " ORDER BY ItemLevel DESC, name ASC" ..
+            orderBy ..
             " LIMIT " .. PAGE_SIZE .. " OFFSET " .. offset)
 
         if q then
@@ -134,8 +226,9 @@ if AIO.AddAddon() then
                 local invType  = q:GetUInt32(5)
                 local iClass   = q:GetUInt32(6)
                 local iSubClass = q:GetUInt32(7)
+                local itemSet  = q:GetUInt32(8)
                 table.insert(items, {
-                    entry, name, quality, ilvl, reqLvl, invType, iClass, iSubClass
+                    entry, name, quality, ilvl, reqLvl, invType, iClass, iSubClass, itemSet
                 })
             until not q:NextRow()
         end
@@ -244,6 +337,51 @@ else
           }
         },
         { id = "CONSUMABLES", label = "Consumables",   icon = "Interface\\Icons\\INV_Potion_54" },
+                { id = "ITEMSETS",    label = "Item Sets",     icon = "Interface\\Icons\\INV_Chest_Cloth_17",
+                    subcats = {
+                        { id = "T4_70",    label = "Tier 4 (i70)" },
+                        { id = "T5_79",    label = "Tier 5 (i79)" },
+                        { id = "T6_89",    label = "Tier 6 (i89)" },
+                        { id = "T7_99",    label = "Tier 7 (i99)" },
+                        { id = "T75_109",  label = "Tier 7.5 (i109)" },
+                        { id = "T8_129",   label = "Tier 8 (i129)" },
+                        { id = "T85_149",  label = "Tier 8.5 (i149)" },
+                        { id = "T9_159",   label = "Tier 9 (i159)" },
+                        { id = "T95_169",  label = "Tier 9.5 (i169)" },
+                        { id = "T10_179",  label = "Tier 10 (i179)" },
+                        { id = "T10S_199", label = "T10 Sanctified (i199)" },
+                        { id = "T10_ALL",  label = "T10 All (179+199)" },
+                    }
+                },
+                { id = "ITEMSETS_CLASS", label = "Set by Class", icon = "Interface\\Icons\\INV_Helmet_06",
+                    subcats = {
+                        { id = "WARRIOR",     label = "Warrior" },
+                        { id = "PALADIN",     label = "Paladin" },
+                        { id = "HUNTER",      label = "Hunter" },
+                        { id = "ROGUE",       label = "Rogue" },
+                        { id = "PRIEST",      label = "Priest" },
+                        { id = "DEATHKNIGHT", label = "Death Knight" },
+                        { id = "SHAMAN",      label = "Shaman" },
+                        { id = "MAGE",        label = "Mage" },
+                        { id = "WARLOCK",     label = "Warlock" },
+                        { id = "DRUID",       label = "Druid" },
+                    }
+                },
+        { id = "LEGENDARIES", label = "Legendaries",   icon = "Interface\\Icons\\INV_Sword_39" },
+                { id = "CLASSSPEC",   label = "Class Specific", icon = "Interface\\Icons\\INV_Misc_Book_09",
+                    subcats = {
+                        { id = "WARRIOR",     label = "Warrior" },
+                        { id = "PALADIN",     label = "Paladin" },
+                        { id = "HUNTER",      label = "Hunter" },
+                        { id = "ROGUE",       label = "Rogue" },
+                        { id = "PRIEST",      label = "Priest" },
+                        { id = "DEATHKNIGHT", label = "Death Knight" },
+                        { id = "SHAMAN",      label = "Shaman" },
+                        { id = "MAGE",        label = "Mage" },
+                        { id = "WARLOCK",     label = "Warlock" },
+                        { id = "DRUID",       label = "Druid" },
+                    }
+                },
         { id = "GEMS",        label = "Gems",           icon = "Interface\\Icons\\INV_Misc_Gem_01" },
         { id = "RECIPES",     label = "Recipes",        icon = "Interface\\Icons\\INV_Scroll_03" },
         { id = "TRADESKILL",  label = "Trade Goods",    icon = "Interface\\Icons\\INV_Fabric_Silk_02" },
@@ -760,6 +898,7 @@ else
             local qual   = item[3] or 1
             local ilvl   = item[4] or 0
             local reqLvl = item[5] or 0
+            local itemSet = item[9] or 0
 
             row.itemEntry = entry
 
@@ -779,8 +918,13 @@ else
             row.ilvlText:SetText(ilvl > 0 and ilvl or "")
             row.ilvlText:SetTextColor(0.7, 0.7, 0.7)
 
-            row.reqText:SetText(reqLvl > 0 and reqLvl or "")
-            row.reqText:SetTextColor(0.6, 0.6, 0.6)
+            if activeCat == "ITEMSETS" or activeCat == "ITEMSETS_CLASS" then
+                row.reqText:SetText(itemSet > 0 and itemSet or "")
+                row.reqText:SetTextColor(1.0, 0.82, 0.0)
+            else
+                row.reqText:SetText(reqLvl > 0 and reqLvl or "")
+                row.reqText:SetTextColor(0.6, 0.6, 0.6)
+            end
 
             row:Show()
         end
@@ -793,6 +937,12 @@ else
         currentPage = page
         totalPages  = pages
         totalItems  = total
+
+        if catID == "ITEMSETS" or catID == "ITEMSETS_CLASS" then
+            hdrReq:SetText("|cffaaaaccSet|r")
+        else
+            hdrReq:SetText("|cffaaaaccReq|r")
+        end
 
         pageText:SetText(page .. " / " .. pages)
         totalText:SetText("|cff888888" .. total .. " items|r")
