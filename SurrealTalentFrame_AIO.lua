@@ -77,6 +77,32 @@ else
     local ST_orderedTalents = {}  -- [tabIdx] = {{id=, def=}, ...}
     local ST_talentIndex    = {}  -- [tabIdx][talentId] = orderedIdx
 
+    -- Bot-editing target (nil = editing your own talents). Set via
+    -- SetEditTarget() / the exposed _G.SurrealTalentFrame_OpenFor entry
+    -- point used by the Army panel's "Edit Full Build" button. Only talent
+    -- points are supported for bot targets — glyph slots stay disabled.
+    local ST_editTarget = nil
+
+    local function SetEditTarget(name, classId)
+        ST_editTarget = name
+        local newClassId = classId or CLASS_TOKEN_TO_ID[ST_classToken]
+        if newClassId ~= ST_classId then
+            ST_classId = newClassId
+            ST_classTrees = SURREAL_TALENT_TREES and SURREAL_TALENT_TREES[ST_classId]
+            ST_orderedTalents = {}
+            ST_talentIndex = {}
+        end
+        ST_dataReady = false
+        if UpdateEditTargetBanner then UpdateEditTargetBanner() end
+    end
+
+    _G.SurrealTalentFrame_OpenFor = function(name, classId)
+        SetEditTarget(name, classId)
+        if SurrealTalentFrame then
+            SurrealTalentFrame:Show()
+        end
+    end
+
     -- Zone layout constants (must be declared before GetTalentInfo)
     local SPEC_COL_START = 3
     local SPEC_COLS = 7
@@ -415,7 +441,7 @@ else
         if talentId then
             DebugTalent("Learn request talent=" .. tostring(talentId) .. " rank=" .. tostring(currentRank))
             SetServerWait(true, "learn")
-            AIO.Handle("SurrealTalents", "LearnTalent", talentId, currentRank)
+            AIO.Handle("SurrealTalents", "LearnTalent", talentId, currentRank, ST_editTarget)
             ScheduleTalentRefresh(0.6)
         end
     end
@@ -441,7 +467,7 @@ else
             for _ in pairs(payload) do queuedCount = queuedCount + 1 end
             DebugTalent("Apply clicked, queued talents=" .. tostring(queuedCount))
             SetServerWait(true, "apply")
-            AIO.Handle("SurrealTalents", "ApplyPreviewTalents", payload)
+            AIO.Handle("SurrealTalents", "ApplyPreviewTalents", payload, ST_editTarget)
             ScheduleTalentRefresh(0.6)
         end
         ST_previewPoints = {}
@@ -481,8 +507,8 @@ else
 
     -- Request talents from server on frame open
     RequestTalentsFromServer = function()
-        DebugTalent("RequestTalents")
-        AIO.Handle("SurrealTalents", "RequestTalents")
+        DebugTalent("RequestTalents target=" .. tostring(ST_editTarget))
+        AIO.Handle("SurrealTalents", "RequestTalents", ST_editTarget)
     end
 
     -- =================================================================
@@ -778,6 +804,20 @@ else
     local titleText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     titleText:SetPoint("TOP", 0, -14)
     titleText:SetText("")
+
+    -- Shown only while editing a bot's build (see SetEditTarget)
+    local editTargetBanner = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    editTargetBanner:SetPoint("TOP", titleText, "BOTTOM", 0, -2)
+    editTargetBanner:Hide()
+
+    function UpdateEditTargetBanner()
+        if ST_editTarget then
+            editTargetBanner:SetText("|cff55ff55Editing " .. ST_editTarget .. "'s build|r")
+            editTargetBanner:Show()
+        else
+            editTargetBanner:Hide()
+        end
+    end
 
     local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", -2, -2)
@@ -1408,6 +1448,10 @@ else
         gBtn.socketIdx = socketIdx
 
         gBtn:SetScript("OnClick", function(self, button)
+            if ST_editTarget then
+                PushTalentFeedback("Glyphs can only be managed on your own character.")
+                return
+            end
             -- Left-click: show glyph picker
             if button == "LeftButton" then
                 ShowGlyphPicker(self.socketIdx)
@@ -2368,7 +2412,7 @@ else
         end
         -- Ask server for reset cost
         SetServerWait(true, "reset-cost")
-        AIO.Handle("SurrealTalents", "GetResetCost")
+        AIO.Handle("SurrealTalents", "GetResetCost", ST_editTarget)
     end)
 
     -- Confirmation dialog (static popup style)
@@ -2378,7 +2422,7 @@ else
         button2 = "Cancel",
         OnAccept = function()
             SetServerWait(true, "reset")
-            AIO.Handle("SurrealTalents", "ConfirmReset")
+            AIO.Handle("SurrealTalents", "ConfirmReset", ST_editTarget)
         end,
         timeout = 0,
         whileDead = false,
@@ -2439,9 +2483,20 @@ else
     end
 
     -- Server → Client: receive full talent state
-    function ClientHandlers.ReceiveTalents(player, talents, spent, maxPts, unspent, tabInfo)
+    function ClientHandlers.ReceiveTalents(player, talents, spent, maxPts, unspent, tabInfo, targetName, classId)
+        -- Ignore stale replies from a target we've since switched away from
+        if targetName ~= ST_editTarget then return end
+
         DebugTalent("ReceiveTalents spent=" .. tostring(spent or 0) .. " unspent=" .. tostring(unspent or 0))
         SetServerWait(false)
+
+        local newClassId = classId or CLASS_TOKEN_TO_ID[ST_classToken]
+        if newClassId ~= 0 and newClassId ~= ST_classId then
+            ST_classId = newClassId
+            ST_classTrees = SURREAL_TALENT_TREES and SURREAL_TALENT_TREES[ST_classId]
+            ST_orderedTalents = {}
+            ST_talentIndex = {}
+        end
         InitTreeData()  -- ensure tree data is built
         ST_playerTalents = talents or {}
         ST_spent = spent or 0
@@ -2878,6 +2933,9 @@ else
         if SurrealTalentFrame:IsShown() then
             SurrealTalentFrame:Hide()
         else
+            -- Normal keybind/menu open always means "my own talents",
+            -- even if the frame was last showing a bot's build.
+            SetEditTarget(nil, nil)
             SurrealTalentFrame:Show()
         end
     end

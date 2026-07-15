@@ -48,6 +48,75 @@ if AIO.AddAddon() then
             player:RunCommand("army dismiss")
         end
     end
+
+    -- ─── Bags tab: inventory / gear management ─────────────────────────────
+    function Handlers.RequestBotInventory(player, targetName)
+        if not player or not targetName or targetName == "" then
+            return
+        end
+
+        local target
+        if targetName == player:GetName() then
+            target = player
+        else
+            target = GetPlayerByName(targetName)
+        end
+
+        if not target then
+            AIO.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName, "", "")
+            return
+        end
+
+        -- Equipped items: slots 0-18
+        local equipParts = {}
+        for slot = 0, 18 do
+            local item = target:GetItemByPos(255, slot)
+            if item then
+                equipParts[#equipParts + 1] = slot .. ":" .. item:GetEntry() .. ":" .. item:GetCount()
+            end
+        end
+
+        -- Bag items: backpack (255, slots 23-38) + 4 equipped bags (19-22, slots 0-35)
+        local bagParts = {}
+        for slot = 23, 38 do
+            local item = target:GetItemByPos(255, slot)
+            if item then
+                bagParts[#bagParts + 1] = "255:" .. slot .. ":" .. item:GetEntry() .. ":" .. item:GetCount()
+            end
+        end
+        for bag = 19, 22 do
+            for slot = 0, 35 do
+                local item = target:GetItemByPos(bag, slot)
+                if item then
+                    bagParts[#bagParts + 1] = bag .. ":" .. slot .. ":" .. item:GetEntry() .. ":" .. item:GetCount()
+                end
+            end
+        end
+
+        AIO.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName,
+                   table.concat(equipParts, "|"), table.concat(bagParts, "|"))
+    end
+
+    function Handlers.EquipBotItem(player, botName, bag, slot)
+        if not player or not botName then
+            return
+        end
+        player:RunCommand("army equipitem " .. botName .. " " .. bag .. " " .. slot)
+    end
+
+    function Handlers.UnequipBotItem(player, botName, slot)
+        if not player or not botName then
+            return
+        end
+        player:RunCommand("army unequip " .. botName .. " " .. slot)
+    end
+
+    function Handlers.AutoEquipBot(player, botName)
+        if not player or not botName then
+            return
+        end
+        player:RunCommand("army equip " .. botName)
+    end
 else
     -- CLIENT SIDE
     local ArmyHandlers = AIO.AddHandlers("SurrealArmy", {})
@@ -231,6 +300,12 @@ else
     local selectedSlot = nil
     local activeTab = "character"  -- "character", "talents", "bags"
 
+    -- Track who the Character/Bags tabs are currently showing gear for, and
+    -- whether it's an interactive bot (equip/unequip enabled) vs. read-only
+    -- (the master's own character).
+    local bagsCurrentName = nil
+    local bagsCurrentInteractive = false
+
     --------------------------------------------------------------------------
     -- RIGHT SIDE TAB LIST
     --------------------------------------------------------------------------
@@ -255,13 +330,6 @@ else
     centerFrame:SetSize(500, 500)
     centerFrame:SetPoint("CENTER", armyFrame, "CENTER", -50, 20)
 
-    local centerModel = CreateFrame("DressUpModel", nil, centerFrame)
-    centerModel:SetPoint("CENTER", centerFrame, "CENTER", 0, -20)
-    centerModel:SetSize(400, 400)
-    centerModel:SetUnit("player")
-
-
-
     local centerName = centerFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     centerName:SetPoint("TOP", centerFrame, "TOP", 0, -10)
     centerName:SetText("|cffffd700" .. (UnitName("player") or "Player") .. "|r")
@@ -271,26 +339,242 @@ else
     centerInfo:SetPoint("TOP", centerName, "BOTTOM", 0, -4)
     centerInfo:SetText("")
 
+    local centerModel = CreateFrame("DressUpModel", nil, centerFrame)
+    centerModel:SetSize(280, 330)
+    centerModel:SetPoint("TOP", centerInfo, "BOTTOM", 0, -20)
+    centerModel:SetUnit("player")
+
+    -- ── Equipped gear — paperdoll-style left/right/bottom slot columns ──
+    -- Same spacing convention as SurrealCharacter_AIO.lua's equipment slots.
+    local SLOT_SIZE = 40
+    local SLOT_GAP  = 6
+    local SLOT_STEP = SLOT_SIZE + SLOT_GAP
+
+    -- { label, slotString (for default icon lookup), server equipment slot }
+    local LEFT_SLOTS = {
+        { "Head",     "HeadSlot",     0  },
+        { "Neck",     "NeckSlot",     1  },
+        { "Shoulder", "ShoulderSlot", 2  },
+        { "Back",     "BackSlot",     14 },
+        { "Chest",    "ChestSlot",    4  },
+        { "Shirt",    "ShirtSlot",    3  },
+        { "Tabard",   "TabardSlot",   18 },
+        { "Wrist",    "WristSlot",    8  },
+    }
+    local RIGHT_SLOTS = {
+        { "Hands",     "HandsSlot",    9  },
+        { "Waist",     "WaistSlot",    5  },
+        { "Legs",      "LegsSlot",     6  },
+        { "Feet",      "FeetSlot",     7  },
+        { "Ring 1",    "Finger0Slot",  10 },
+        { "Ring 2",    "Finger1Slot",  11 },
+        { "Trinket 1", "Trinket0Slot", 12 },
+        { "Trinket 2", "Trinket1Slot", 13 },
+    }
+    local BOTTOM_SLOTS = {
+        { "Main Hand", "MainHandSlot",       15 },
+        { "Off Hand",  "SecondaryHandSlot",  16 },
+        { "Ranged",    "RangedSlot",         17 },
+    }
+
+    local equipBtns = {}
+
+    local function CreateArmyEquipSlot(label, slotString, serverSlot, xOff, yOff)
+        local _, defaultTex = GetInventorySlotInfo(slotString)
+
+        local btn = CreateFrame("Button", nil, centerFrame)
+        btn:SetSize(SLOT_SIZE, SLOT_SIZE)
+        btn:SetPoint("TOP", centerModel, "TOP", xOff, yOff)
+        btn.slot = serverSlot
+        btn.slotLabel = label
+
+        local bg = btn:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetTexture(defaultTex or "Interface\\PaperDoll\\UI-PaperDoll-Slot-Chest")
+        bg:SetAlpha(0.5)
+        btn.bg = bg
+
+        local icon = btn:CreateTexture(nil, "ARTWORK")
+        icon:SetAllPoints()
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        icon:Hide()
+        btn.icon = icon
+
+        local border = CreateFrame("Frame", nil, btn)
+        border:SetPoint("TOPLEFT", -3, 3)
+        border:SetPoint("BOTTOMRIGHT", 3, -3)
+        border:SetBackdrop({
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            edgeSize = 12,
+            insets = { left = 2, right = 2, top = 2, bottom = 2 },
+        })
+        border:SetBackdropBorderColor(0.3, 0.3, 0.3, 0)
+        btn.border = border
+
+        local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+        hl:SetBlendMode("ADD")
+        hl:SetAlpha(0.3)
+
+        btn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            if self.entry then
+                GameTooltip:SetHyperlink("item:" .. self.entry)
+            else
+                GameTooltip:SetText(self.slotLabel, 1, 1, 1)
+                GameTooltip:AddLine("Empty slot", 0.5, 0.5, 0.5)
+            end
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        btn:SetScript("OnClick", function(self)
+            if self.entry and bagsCurrentInteractive and bagsCurrentName then
+                AIO.Handle("SurrealArmy", "UnequipBotItem", bagsCurrentName, self.slot)
+                local t = CreateFrame("Frame")
+                t.elapsed = 0
+                t:SetScript("OnUpdate", function(f, dt)
+                    f.elapsed = f.elapsed + dt
+                    if f.elapsed >= 0.4 then
+                        f:SetScript("OnUpdate", nil)
+                        AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                    end
+                end)
+            end
+        end)
+
+        btn:Hide()
+        equipBtns[serverSlot] = btn
+        return btn
+    end
+
+    -- Left column (hugging left side of the 3D model)
+    local leftColX  = -(SLOT_SIZE / 2) - 8
+    local rightColX = (SLOT_SIZE / 2) + 8
+    for i, s in ipairs(LEFT_SLOTS) do
+        CreateArmyEquipSlot(s[1], s[2], s[3], leftColX - centerModel:GetWidth()/2, -(i - 1) * SLOT_STEP)
+    end
+    -- Right column (hugging right side of the 3D model)
+    for i, s in ipairs(RIGHT_SLOTS) do
+        CreateArmyEquipSlot(s[1], s[2], s[3], rightColX + centerModel:GetWidth()/2 - SLOT_SIZE, -(i - 1) * SLOT_STEP)
+    end
+    -- Bottom weapons (centered under the model)
+    local wepY = -(8 * SLOT_STEP) - 16
+    local wepStart = -(3 * SLOT_SIZE + 2 * 10) / 2
+    for i, s in ipairs(BOTTOM_SLOTS) do
+        CreateArmyEquipSlot(s[1], s[2], s[3], wepStart + (i - 1) * (SLOT_SIZE + 10), wepY)
+    end
+
     -- Talents panel (hidden by default)
     local talentPanel = CreateFrame("Frame", nil, armyFrame)
-    talentPanel:SetSize(700, 520)
-    talentPanel:SetPoint("CENTER", armyFrame, "CENTER", -50, 10)
+    talentPanel:SetSize(760, 520)
+    talentPanel:SetPoint("CENTER", armyFrame, "CENTER", -30, 10)
     talentPanel:Hide()
 
     local talentTitle = talentPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     talentTitle:SetPoint("TOP", talentPanel, "TOP", 0, -6)
     talentTitle:SetText("|cffffd100Talents|r")
 
+    -- Opens the real talent builder (same frame/UI you use for yourself)
+    -- retargeted at whichever character is currently selected, so you can
+    -- actually spend/reset points instead of just viewing them here. Closes
+    -- the Army panel so the two frames don't sit on top of each other.
+    local editBuildBtn = CreateFrame("Button", nil, talentPanel, "UIPanelButtonTemplate")
+    editBuildBtn:SetSize(140, 24)
+    editBuildBtn:SetPoint("TOPRIGHT", talentPanel, "TOPRIGHT", -10, -10)
+    editBuildBtn:SetText("Edit Full Build")
+    editBuildBtn:SetScript("OnClick", function()
+        if not selectedSlot or not _G.SurrealTalentFrame_OpenFor then return end
+        local opened = false
+        if selectedSlot.index == 1 then
+            _G.SurrealTalentFrame_OpenFor(UnitName("player") or "Player", nil)
+            opened = true
+        elseif selectedSlot.isSpawned then
+            local altName = selectedSlot.ddText and selectedSlot.ddText:GetText()
+            if altName and altName ~= "Select Alt" then
+                _G.SurrealTalentFrame_OpenFor(altName, selectedSlot.altClass or 0)
+                opened = true
+            end
+        end
+        if opened then
+            armyFrame:Hide()
+        end
+    end)
+
+    -- ── Zone layout — mirrors SurrealTalentFrame_AIO.lua's class/spec/hero
+    -- tree split so this preview lines up the same way as the real editor.
+    local SPEC_COL_START  = 3
+    local SPEC_COLS       = 7
+    local SIDE_ROWS       = 5
+    local SIDE_COLS       = 3
+    local HERO2_ROW_START = 5
+
+    local function IsIgnoredCorner(localRow, localCol)
+        if localRow < 1 or localCol < 1 then return false end
+        if localCol ~= 1 and localCol ~= SIDE_COLS then return false end
+        return localRow == 1 or localRow == SIDE_ROWS
+    end
+
+    -- Returns zone, localRow, localCol for a talent def (row/col are 1-based
+    -- global grid coordinates from SURREAL_TALENT_TREES).
+    local function TalentZone(def)
+        local row, col = def.row, def.col
+        if not row or not col then return nil end
+
+        if row >= 1 and row <= SIDE_ROWS and col >= 1 and col <= SIDE_COLS then
+            if IsIgnoredCorner(row, col) then return nil end
+            return "class", row, col
+        end
+
+        if row >= 1 and col > SPEC_COL_START and col <= (SPEC_COL_START + SPEC_COLS) then
+            return "spec", row, col - SPEC_COL_START
+        end
+
+        local heroColStart = SPEC_COL_START + SPEC_COLS
+        if col > heroColStart and col <= (heroColStart + SIDE_COLS) then
+            local heroCol = col - heroColStart
+            if row >= 1 and row <= SIDE_ROWS then
+                if IsIgnoredCorner(row, heroCol) then return nil end
+                return "hero1", row, heroCol
+            end
+            if row > HERO2_ROW_START and row <= (HERO2_ROW_START + SIDE_ROWS) then
+                local hero2Row = row - HERO2_ROW_START
+                if IsIgnoredCorner(hero2Row, heroCol) then return nil end
+                return "hero2", hero2Row, heroCol
+            end
+        end
+
+        return nil
+    end
+
+    -- Section headers (class tree / spec / hero trees)
+    local classHeader = talentPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    classHeader:SetText("|cffaaaaccClass Tree|r")
+    local specHeader = talentPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    local heroHeader = talentPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    heroHeader:SetText("|cffaaaaccHero Trees|r")
+
     -- Talent icon grid — pool of reusable icon buttons
-    local TALENT_BTN_SIZE = 34
+    local TALENT_BTN_SIZE = 30
     local TALENT_BTN_GAP  = 4
-    local TALENT_COLS     = 14
-    local MAX_TALENT_BTNS = 60
+    local TALENT_STEP     = TALENT_BTN_SIZE + TALENT_BTN_GAP
+    local MAX_TALENT_BTNS = 90
     local talentBtns = {}
 
+    -- Zone x-origins within talentGrid (class | spec | hero, left-to-right)
+    local ZONE_GAP  = 20
+    local classZoneX = 0
+    local specZoneX  = SIDE_COLS * TALENT_STEP + ZONE_GAP
+    local heroZoneX  = specZoneX + SPEC_COLS * TALENT_STEP + ZONE_GAP
+
     local talentGrid = CreateFrame("Frame", nil, talentPanel)
-    talentGrid:SetSize(TALENT_COLS * (TALENT_BTN_SIZE + TALENT_BTN_GAP), 400)
-    talentGrid:SetPoint("TOP", talentTitle, "BOTTOM", 0, -8)
+    talentGrid:SetSize(heroZoneX + SIDE_COLS * TALENT_STEP, 400)
+    talentGrid:SetPoint("TOP", talentTitle, "BOTTOM", 0, -34)
+
+    classHeader:SetPoint("BOTTOMLEFT", talentGrid, "TOPLEFT", classZoneX, 6)
+    specHeader:SetPoint("BOTTOMLEFT", talentGrid, "TOPLEFT", specZoneX, 6)
+    heroHeader:SetPoint("BOTTOMLEFT", talentGrid, "TOPLEFT", heroZoneX, 6)
 
     for bi = 1, MAX_TALENT_BTNS do
         local btn = CreateFrame("Button", nil, talentGrid)
@@ -344,9 +628,176 @@ else
     bagsTitle:SetPoint("TOP", bagsPanel, "TOP", 0, -10)
     bagsTitle:SetText("|cffffd100Bags|r")
 
-    local bagsComingSoon = bagsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    bagsComingSoon:SetPoint("CENTER", bagsPanel, "CENTER", 0, 0)
-    bagsComingSoon:SetText("|cff888888Coming Soon|r")
+    local bagsEmpty = bagsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    bagsEmpty:SetPoint("CENTER", bagsPanel, "CENTER", 0, 0)
+    bagsEmpty:SetText("|cffaaaaaaSelect a spawned character to view their gear.|r")
+
+    -- ── Bag contents grid ───────────────────────────────────────────────
+    local BAG_BTN_SIZE = 30
+    local BAG_COLS      = 12
+    local MAX_BAG_BTNS  = 96
+
+    local bagSectionTitle = bagsPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    bagSectionTitle:SetPoint("TOPLEFT", bagsTitle, "BOTTOMLEFT", -290, -14)
+    bagSectionTitle:SetText("|cffffd700Bags|r")
+
+    local bagGrid = CreateFrame("Frame", nil, bagsPanel)
+    bagGrid:SetPoint("TOPLEFT", bagSectionTitle, "BOTTOMLEFT", 0, -6)
+    bagGrid:SetSize(BAG_COLS * (BAG_BTN_SIZE + 3), 300)
+
+    local bagBtns = {}
+    for i = 1, MAX_BAG_BTNS do
+        local btn = CreateFrame("Button", nil, bagGrid)
+        btn:SetSize(BAG_BTN_SIZE, BAG_BTN_SIZE)
+        btn:SetPoint("TOPLEFT", bagGrid, "TOPLEFT",
+            ((i - 1) % BAG_COLS) * (BAG_BTN_SIZE + 3),
+            -math.floor((i - 1) / BAG_COLS) * (BAG_BTN_SIZE + 3))
+
+        local icon = btn:CreateTexture(nil, "ARTWORK")
+        icon:SetAllPoints()
+        btn.icon = icon
+
+        local countText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        countText:SetPoint("BOTTOMRIGHT", -1, 1)
+        btn.countText = countText
+
+        btn:SetScript("OnEnter", function(self)
+            if self.entry then
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:SetHyperlink("item:" .. self.entry)
+                GameTooltip:Show()
+            end
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+        btn:SetScript("OnClick", function(self)
+            if self.entry and bagsCurrentInteractive and bagsCurrentName then
+                AIO.Handle("SurrealArmy", "EquipBotItem", bagsCurrentName, self.bag, self.slot)
+                local t = CreateFrame("Frame")
+                t.elapsed = 0
+                t:SetScript("OnUpdate", function(f, dt)
+                    f.elapsed = f.elapsed + dt
+                    if f.elapsed >= 0.4 then
+                        f:SetScript("OnUpdate", nil)
+                        AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                    end
+                end)
+            end
+        end)
+
+        btn:Hide()
+        bagBtns[i] = btn
+    end
+
+    -- ── Auto-Equip Best button ──────────────────────────────────────────
+    local autoEquipBtn = CreateFrame("Button", nil, bagsPanel, "UIPanelButtonTemplate")
+    autoEquipBtn:SetSize(140, 24)
+    autoEquipBtn:SetPoint("TOPLEFT", bagSectionTitle, "TOPRIGHT", 200, 4)
+    autoEquipBtn:SetText("Auto-Equip Best")
+    autoEquipBtn:SetScript("OnClick", function()
+        if bagsCurrentInteractive and bagsCurrentName then
+            AIO.Handle("SurrealArmy", "AutoEquipBot", bagsCurrentName)
+            local t = CreateFrame("Frame")
+            t.elapsed = 0
+            t:SetScript("OnUpdate", function(f, dt)
+                f.elapsed = f.elapsed + dt
+                if f.elapsed >= 0.5 then
+                    f:SetScript("OnUpdate", nil)
+                    AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                end
+            end)
+        end
+    end)
+    autoEquipBtn:Hide()
+
+    -- Populate the Bags tab from parsed inventory strings
+    local function UpdateBagsDisplay(name, interactive, equipStr, bagStr)
+        bagsCurrentName = name
+        bagsCurrentInteractive = interactive or false
+
+        for i = 0, 18 do equipBtns[i]:Hide() end
+        for i = 1, MAX_BAG_BTNS do bagBtns[i]:Hide() end
+        autoEquipBtn:Hide()
+
+        if not name then
+            bagsEmpty:SetText("|cffaaaaaaSelect a spawned character to view their gear.|r")
+            bagsEmpty:Show()
+            return
+        end
+
+        if not equipStr and not bagStr then
+            -- Waiting on server response
+            bagsEmpty:SetText("|cffaaaaaaLoading gear for " .. name .. "...|r")
+            bagsEmpty:Show()
+            return
+        end
+
+        if equipStr == "" and bagStr == "" then
+            bagsEmpty:SetText("|cffff6666" .. name .. " is not in the world (spawn them first).|r")
+            bagsEmpty:Show()
+            return
+        end
+
+        bagsEmpty:Hide()
+        if bagsCurrentInteractive then
+            autoEquipBtn:Show()
+        end
+
+        if equipStr and equipStr ~= "" then
+            for part in equipStr:gmatch("[^|]+") do
+                local slot, entry, count = part:match("^(%d+):(%d+):(%d+)$")
+                slot = tonumber(slot)
+                entry = tonumber(entry)
+                if slot and entry and equipBtns[slot] then
+                    local btn = equipBtns[slot]
+                    local _, _, _, _, _, _, _, _, _, tex = GetItemInfo(entry)
+                    btn.icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    btn.entry = entry
+                    btn:Show()
+                end
+            end
+        end
+
+        if bagStr and bagStr ~= "" then
+            local idx = 0
+            for part in bagStr:gmatch("[^|]+") do
+                local bag, slot, entry, count = part:match("^(%d+):(%d+):(%d+):(%d+)$")
+                idx = idx + 1
+                if idx <= MAX_BAG_BTNS and bag and slot and entry then
+                    local btn = bagBtns[idx]
+                    local _, _, _, _, _, _, _, _, _, tex = GetItemInfo(tonumber(entry))
+                    btn.icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    btn.entry = tonumber(entry)
+                    btn.bag = tonumber(bag)
+                    btn.slot = tonumber(slot)
+                    count = tonumber(count) or 1
+                    btn.countText:SetText(count > 1 and count or "")
+                    btn:Show()
+                end
+            end
+        end
+    end
+    _G.SurrealArmyUpdateBagsDisplay = UpdateBagsDisplay
+
+    -- Ask the server for gear data for whichever character is selected
+    local function RequestBagsFor(name, interactive)
+        bagsCurrentName = name
+        bagsCurrentInteractive = interactive
+        if not name then
+            UpdateBagsDisplay(nil)
+            return
+        end
+        UpdateBagsDisplay(name, interactive, nil, nil) -- show "Loading..."
+        AIO.Handle("SurrealArmy", "RequestBotInventory", name)
+    end
+    _G.SurrealArmyRequestBagsFor = RequestBagsFor
+
+    -- Server responded with gear data — only apply if still the active selection
+    function ArmyHandlers.ReceiveBotInventory(player, targetName, equipStr, bagStr)
+        if targetName == bagsCurrentName then
+            UpdateBagsDisplay(targetName, bagsCurrentInteractive, equipStr, bagStr)
+        end
+    end
 
     -- Tab content map
     local tabPanels = {
@@ -432,15 +883,19 @@ else
     }
 
     --------------------------------------------------------------------------
-    -- TALENT DISPLAY — inspect-based grid with real tier/column positions
+    -- TALENT DISPLAY — driven by the custom talent system (SURREAL_TALENT_TREES
+    -- + server-pushed talent ranks). This server replaced Blizzard's native
+    -- talent trees, so the native inspect-based talent API has no useful
+    -- data; see SurrealTalentBridge_AIO.lua for the equivalent server logic.
     --------------------------------------------------------------------------
-    -- Track which bot we're inspecting
-    local inspectingBotName = nil
-    local inspectingBotUnit = nil
+    local talentsCurrentName = nil
 
-    local function UpdateTalentDisplay(unitName, isInspect)
-        -- Hide all talent buttons first
+    local function UpdateTalentDisplay(unitName, talents, classId)
+        -- Hide all talent buttons/headers first
         for bi = 1, MAX_TALENT_BTNS do talentBtns[bi]:Hide() end
+        classHeader:Hide()
+        specHeader:Hide()
+        heroHeader:Hide()
 
         if not unitName or unitName == "Select Alt" then
             talentEmpty:SetText("|cffaaaaaaSelect a character to view their talents.|r")
@@ -450,112 +905,133 @@ else
         end
         talentTitle:SetText("|cffffd100" .. unitName .. " \226\128\148 Talents|r")
 
-        -- Determine if we use inspect or player API
-        local useInspect = isInspect
-        local numTabs = GetNumTalentTabs(useInspect) or 0
-        if numTabs == 0 and isInspect then
-            -- Inspect data not ready yet
+        if not talents then
             talentEmpty:SetText("|cffaaaaaa" .. unitName .. "'s talents loading...|r")
             talentEmpty:Show()
             return
         end
-        if numTabs == 0 then
+
+        local classTrees = SURREAL_TALENT_TREES and SURREAL_TALENT_TREES[classId]
+        if not classTrees or not classTrees.tabs then
             talentEmpty:SetText("|cffaaaaaaNo talent data available.|r")
             talentEmpty:Show()
             return
         end
 
-        -- Build spec tab buttons at the top of the talent panel
-        -- Find which spec has the most points (or show all 3 tabs)
-        local tabInfo = {}
-        local bestTab, bestPts = 1, 0
-        for tab = 1, numTabs do
-            local tabName, tabIcon, pointsSpent = GetTalentTabInfo(tab, useInspect)
-            tabInfo[tab] = { name = tabName, icon = tabIcon, pts = pointsSpent or 0 }
-            if (pointsSpent or 0) > bestPts then
-                bestTab = tab
-                bestPts = pointsSpent
+        -- Same as the real talent frame: show only the committed spec
+        -- (whichever tab has the most points spent), not every tab at once.
+        local bestTab, bestPts = nil, 0
+        for _, tab in ipairs(classTrees.tabs) do
+            local pts = 0
+            for talentId in pairs(tab.talents or {}) do
+                pts = pts + (tonumber(talents[talentId]) or 0)
+            end
+            if pts > bestPts then
+                bestTab, bestPts = tab, pts
             end
         end
 
-        -- Use a grid layout: 5 columns wide, positioned by tier (row) and column
-        local GRID_COLS = 5
-        local GRID_BTN = TALENT_BTN_SIZE
-        local GRID_GAP_X = 52   -- horizontal spacing between button origins
-        local GRID_GAP_Y = 42   -- vertical spacing between button origins
-        local TAB_HEADER_H = 28
+        if not bestTab then
+            talentEmpty:SetText("|cffaaaaaa" .. unitName .. " has no talents spent yet.|r")
+            talentEmpty:Show()
+            return
+        end
+        talentEmpty:Hide()
+
+        specHeader:SetText("|cffffd700" .. (bestTab.name or "Spec") .. "|r  (" .. bestPts .. " pts)")
+
+        -- Classify this tab's talents into class/spec/hero1/hero2 zones
+        local entries = {}
+        local zoneUsed = { class = false, hero1 = false, hero2 = false }
+        for talentId, def in pairs(bestTab.talents or {}) do
+            local zone, lr, lc = TalentZone(def)
+            if zone then
+                entries[#entries + 1] = { id = talentId, def = def, zone = zone, lr = lr, lc = lc }
+                if zoneUsed[zone] ~= nil then zoneUsed[zone] = true end
+            end
+        end
+
+        if zoneUsed.class then classHeader:Show() else classHeader:Hide() end
+        specHeader:Show()
+        if zoneUsed.hero1 or zoneUsed.hero2 then heroHeader:Show() else heroHeader:Hide() end
 
         local idx = 0
-        local yOffset = 0
+        for _, e in ipairs(entries) do
+            if idx < MAX_TALENT_BTNS then
+                local rank = tonumber(talents[e.id]) or 0
+                local maxRank = tonumber(e.def.maxRank) or 0
+                local spellId = e.def.spells and e.def.spells[1]
+                local name, iconTex
+                if spellId then
+                    name, _, iconTex = GetSpellInfo(spellId)
+                end
+                name = name or ("Talent " .. e.id)
+                iconTex = iconTex or "Interface\\Icons\\INV_Misc_QuestionMark"
 
-        for tab = 1, numTabs do
-            local tabName = tabInfo[tab].name
-            local tabPts  = tabInfo[tab].pts
-            if tabPts > 0 then
-                -- Count learned talents in this tab
-                local numTalents = GetNumTalents(tab, useInspect) or 0
-                local learnedCount = 0
-                local maxTier = 0
-
-                -- First pass: find learned talents and max tier
-                local learned = {}
-                for ti = 1, numTalents do
-                    local name, iconTex, tier, col, curRank, maxRank = GetTalentInfo(tab, ti, useInspect)
-                    if name and curRank and curRank > 0 then
-                        learned[#learned + 1] = { ti = ti, name = name, icon = iconTex, tier = tier, col = col, rank = curRank, maxRank = maxRank }
-                        if tier and tier > maxTier then maxTier = tier end
-                        learnedCount = learnedCount + 1
-                    end
+                local x, y
+                if e.zone == "class" then
+                    x, y = classZoneX + (e.lc - 1) * TALENT_STEP, (e.lr - 1) * TALENT_STEP
+                elseif e.zone == "spec" then
+                    x, y = specZoneX + (e.lc - 1) * TALENT_STEP, (e.lr - 1) * TALENT_STEP
+                elseif e.zone == "hero1" then
+                    x, y = heroZoneX + (e.lc - 1) * TALENT_STEP, (e.lr - 1) * TALENT_STEP
+                else -- hero2, stacked below hero1 with a gap
+                    x = heroZoneX + (e.lc - 1) * TALENT_STEP
+                    y = (SIDE_ROWS * TALENT_STEP + 16) + (e.lr - 1) * TALENT_STEP
                 end
 
-                if learnedCount > 0 then
-                    -- Show all talents in this tab (learned = full color, unlearned = dim)
-                    for ti = 1, numTalents do
-                        local name, iconTex, tier, col, curRank, maxRank = GetTalentInfo(tab, ti, useInspect)
-                        if name and iconTex and tier and col and idx < MAX_TALENT_BTNS then
-                            idx = idx + 1
-                            local btn = talentBtns[idx]
-                            btn:ClearAllPoints()
-                            btn:SetPoint("TOPLEFT", talentGrid, "TOPLEFT",
-                                col * GRID_GAP_X,
-                                -(yOffset + tier * GRID_GAP_Y))
-                            btn.icon:SetTexture(iconTex)
+                idx = idx + 1
+                local btn = talentBtns[idx]
+                btn:ClearAllPoints()
+                btn:SetPoint("TOPLEFT", talentGrid, "TOPLEFT", x, -y)
+                btn.icon:SetTexture(iconTex)
 
-                            if curRank and curRank > 0 then
-                                btn.icon:SetDesaturated(false)
-                                btn.icon:SetAlpha(1)
-                                if curRank >= maxRank then
-                                    btn.bg:SetTexture(0.85, 0.68, 0.00)
-                                    btn.glow:SetVertexColor(0.85, 0.68, 0.00)
-                                    btn.glow:SetAlpha(0.5)
-                                    btn.glow:Show()
-                                else
-                                    btn.bg:SetTexture(0.00, 0.70, 0.00)
-                                    btn.glow:SetVertexColor(0.00, 0.80, 0.00)
-                                    btn.glow:SetAlpha(0.4)
-                                    btn.glow:Show()
-                                end
-                                btn.spellName = name .. "  " .. curRank .. "/" .. maxRank
-                            else
-                                btn.icon:SetDesaturated(true)
-                                btn.icon:SetAlpha(0.35)
-                                btn.bg:SetTexture(0.13, 0.13, 0.15)
-                                btn.glow:Hide()
-                                btn.spellName = "|cff888888" .. name .. "|r  0/" .. maxRank
-                            end
-                            btn:Show()
-                        end
+                if rank > 0 then
+                    btn.icon:SetDesaturated(false)
+                    btn.icon:SetAlpha(1)
+                    if rank >= maxRank then
+                        btn.bg:SetTexture(0.85, 0.68, 0.00)
+                        btn.glow:SetVertexColor(0.85, 0.68, 0.00)
+                        btn.glow:SetAlpha(0.5)
+                        btn.glow:Show()
+                    else
+                        btn.bg:SetTexture(0.00, 0.70, 0.00)
+                        btn.glow:SetVertexColor(0.00, 0.80, 0.00)
+                        btn.glow:SetAlpha(0.4)
+                        btn.glow:Show()
                     end
-                    yOffset = yOffset + (maxTier + 1) * GRID_GAP_Y + 12
+                    btn.spellName = name .. "  " .. rank .. "/" .. maxRank
+                else
+                    btn.icon:SetDesaturated(true)
+                    btn.icon:SetAlpha(0.35)
+                    btn.bg:SetTexture(0.13, 0.13, 0.15)
+                    btn.glow:Hide()
+                    btn.spellName = "|cff888888" .. name .. "|r  0/" .. maxRank
                 end
+                btn:Show()
             end
         end
+    end
 
-        if idx > 0 then
-            talentEmpty:Hide()
-        else
-            talentEmpty:SetText("|cffaaaaaa" .. unitName .. " has no talents.|r")
-            talentEmpty:Show()
+    -- Ask the server for a character's custom talent ranks
+    local function RequestTalentsFor(name)
+        talentsCurrentName = name
+        if not name then
+            UpdateTalentDisplay(nil)
+            return
+        end
+        UpdateTalentDisplay(name, nil, nil) -- show "loading..."
+        AIO.Handle("SurrealArmyTalents", "RequestBotTalents", name)
+    end
+    _G.SurrealArmyRequestTalentsFor = RequestTalentsFor
+
+    -- Dedicated AIO channel (NOT "SurrealTalents" — that name is already
+    -- registered client-side by SurrealTalentFrame_AIO.lua, and AIO.AddHandlers
+    -- asserts/errors if the same name is registered twice on the same side).
+    local ArmyTalentHandlers = AIO.AddHandlers("SurrealArmyTalents", {})
+    function ArmyTalentHandlers.ReceiveBotTalents(player, targetName, talents, spent, maxPts, unspent, tabInfo, classId)
+        if targetName == talentsCurrentName then
+            UpdateTalentDisplay(targetName, talents or {}, classId)
         end
     end
 
@@ -578,17 +1054,6 @@ else
 
     -- Expose global update functions
     _G.SurrealArmyShowBotModel = ShowBotModel
-
-    -- Listen for inspect talent data to arrive
-    local inspectEventFrame = CreateFrame("Frame")
-    inspectEventFrame:RegisterEvent("INSPECT_TALENT_READY")
-    inspectEventFrame:SetScript("OnEvent", function()
-        if inspectingBotName and armyFrame:IsShown() then
-            UpdateTalentDisplay(inspectingBotName, true)
-        elseif selectedSlot and armyFrame:IsShown() and selectedSlot.index == 1 then
-            UpdateTalentDisplay(UnitName("player"), false)
-        end
-    end)
 
     -- Dismiss All button to the left of slot 1
     local dismissAllBtn = CreateFrame("Button", nil, armyFrame)
@@ -846,12 +1311,12 @@ else
                                 slot.model:SetUnit(unitId)
                                 slot.model:Show()
                             end
-                            -- Inspect for talents
-                            local inspUnit = GetUnitIdByName(altNameForTimer)
-                            if inspUnit then
-                                inspectingBotName = altNameForTimer
-                                inspectingBotUnit = inspUnit
-                                NotifyInspect(inspUnit)
+                            -- Refresh talents/gear if this bot is the current selection
+                            if talentsCurrentName == altNameForTimer then
+                                RequestTalentsFor(altNameForTimer)
+                            end
+                            if bagsCurrentName == altNameForTimer then
+                                RequestBagsFor(altNameForTimer, true)
                             end
                         end
                     end)
@@ -891,7 +1356,8 @@ else
                 centerName:SetText("|cffffd700" .. playerName .. "|r")
                 centerInfo:SetText("Level " .. playerLevel)
                 titleText:SetText("|cffffd100" .. playerName .. "|r")
-                UpdateTalentDisplay(playerName, false)
+                RequestTalentsFor(playerName)
+                RequestBagsFor(playerName, true)
             else
                 local altName = self.ddText:GetText()
                 local altGuid = self.selectedAlt
@@ -899,14 +1365,8 @@ else
                     local altClass = self.altClass or 0
                     local altLevel = self.altLevel or 0
                     if self.isSpawned then
-                        -- Bot is in party — show full model + inspect for talents
+                        -- Bot is in party — show full model
                         ShowBotModel(altName, altClass, altLevel)
-                        local unitId = GetUnitIdByName(altName)
-                        if unitId then
-                            inspectingBotName = altName
-                            inspectingBotUnit = unitId
-                            NotifyInspect(unitId)
-                        end
                     else
                         -- Not spawned — show info text only, no model
                         local className = CLASS_NAMES[altClass] or "Unknown"
@@ -916,18 +1376,21 @@ else
                         centerInfo:SetText("|c" .. classColor .. className .. "|r  Level " .. altLevel .. "  |cff888888(not spawned)|r")
                         titleText:SetText("|cffffd100" .. altName .. "|r")
                     end
-                    -- Talents: only show via inspect if spawned
+                    -- Talents/gear only available while the bot is spawned in the world
                     if self.isSpawned then
-                        UpdateTalentDisplay(altName, true)
+                        RequestTalentsFor(altName)
+                        RequestBagsFor(altName, true)
                     else
-                        UpdateTalentDisplay(nil)
+                        RequestTalentsFor(nil)
+                        RequestBagsFor(nil, false)
                     end
                 else
                     centerName:SetText("")
                     centerInfo:SetText("")
                     titleText:SetText("|cffffd100Select a Character|r")
                     centerModel:ClearModel()
-                    UpdateTalentDisplay(nil)
+                    RequestTalentsFor(nil)
+                    RequestBagsFor(nil, false)
                 end
             end
         end)

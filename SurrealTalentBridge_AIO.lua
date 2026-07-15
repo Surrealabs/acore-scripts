@@ -167,17 +167,19 @@ if AIO.AddAddon() then
         return tabInfo
     end
 
-    local function SendTalentSnapshot(player)
+    local function SendTalentSnapshot(player, target, targetName)
         if not player then return end
-        local guid = player:GetGUIDLow()
+        target = target or player
+        local guid = target:GetGUIDLow()
         local talents = LoadPlayerTalents(guid)
         local spent = CountSpentPoints(talents)
-        local maxPts = GetMaxPoints(player)
+        local maxPts = GetMaxPoints(target)
         local unspent = maxPts - spent
         if unspent < 0 then unspent = 0 end
-        local tabInfo = BuildTabInfo(player, talents)
+        local tabInfo = BuildTabInfo(target, talents)
 
-        AIO.Handle(player, "SurrealTalents", "ReceiveTalents", talents, spent, maxPts, unspent, tabInfo)
+        AIO.Handle(player, "SurrealTalents", "ReceiveTalents", talents, spent, maxPts, unspent, tabInfo,
+                   targetName, target:GetClass())
     end
 
     local function SendDebug(player, message)
@@ -185,20 +187,92 @@ if AIO.AddAddon() then
         AIO.Handle(player, "SurrealTalents", "Debug", message)
     end
 
-    local Handlers = AIO.AddHandlers("SurrealTalents", {})
+    -- Resolves an optional "editing a bot" target. Only allows targeting a
+    -- character on your OWN account that is currently in your party (i.e.
+    -- one of your own spawned Army of Alts bots) — never an arbitrary
+    -- other player's character. Returns (target, resolvedName); target is
+    -- nil if targetName was supplied but couldn't be validated.
+    local function ResolveTarget(player, targetName)
+        if not targetName or targetName == "" or targetName == player:GetName() then
+            return player, nil
+        end
 
-    function Handlers.RequestTalents(player)
-        SendDebug(player, "RequestTalents")
-        SendTalentSnapshot(player)
+        local target = GetPlayerByName(targetName)
+        if not target then return nil, targetName end
+
+        if target:GetAccountId() ~= player:GetAccountId() then
+            return nil, targetName
+        end
+
+        local group = player:GetGroup()
+        if not group or not group:IsMember(target:GetGUID()) then
+            return nil, targetName
+        end
+
+        return target, targetName
     end
 
-    function Handlers.LearnTalent(player, talentId, currentRank)
+    local Handlers = AIO.AddHandlers("SurrealTalents", {})
+
+    function Handlers.RequestTalents(player, targetName)
+        SendDebug(player, "RequestTalents")
+        local target, resolvedName = ResolveTarget(player, targetName)
+        if not target then
+            AIO.Handle(player, "SurrealTalents", "ReceiveTalents", {}, 0, 0, 0, {}, targetName, 0)
+            return
+        end
+        SendTalentSnapshot(player, target, resolvedName)
+    end
+
+    -- Separate AIO channel for the Army panel's own lightweight read-only
+    -- Talents tab preview (can't reuse "SurrealTalents" for registration —
+    -- AIO.AddHandlers asserts if a name is registered twice on the same
+    -- side, and SurrealTalentFrame_AIO.lua already owns the client-side
+    -- "SurrealTalents" handlers).
+    local ArmyTalentHandlers = AIO.AddHandlers("SurrealArmyTalents", {})
+
+    -- Used by the Army panel's Talents tab: fetch another live character's
+    -- (bot's) custom talent picks, or the master's own if targetName matches.
+    function ArmyTalentHandlers.RequestBotTalents(player, targetName)
+        if not player or not targetName or targetName == "" then
+            return
+        end
+
+        local target
+        if targetName == player:GetName() then
+            target = player
+        else
+            target = GetPlayerByName(targetName)
+        end
+
+        if not target then
+            AIO.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName, {}, 0, 0, 0, {}, 0)
+            return
+        end
+
+        local guid = target:GetGUIDLow()
+        local talents = LoadPlayerTalents(guid)
+        local spent = CountSpentPoints(talents)
+        local maxPts = GetMaxPoints(target)
+        local unspent = maxPts - spent
+        if unspent < 0 then unspent = 0 end
+        local tabInfo = BuildTabInfo(target, talents)
+        local classId = target:GetClass()
+
+        AIO.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName,
+                   talents, spent, maxPts, unspent, tabInfo, classId)
+    end
+
+    function Handlers.LearnTalent(player, talentId, currentRank, targetName)
         if not player then return end
-        local guid = player:GetGUIDLow()
+        local target, resolvedName = ResolveTarget(player, targetName)
+        if not target then return end
+
+        local guid = target:GetGUIDLow()
         local tId = tonumber(talentId)
         if not tId then return end
 
-        local talentDef = GetTalentDef(player, tId)
+        local talentDef = GetTalentDef(target, tId)
         if not talentDef then
             SendDebug(player, string.format("LearnTalent id=%d missing-def", math.floor(tId)))
             return
@@ -213,10 +287,10 @@ if AIO.AddAddon() then
         end
 
         local spent = CountSpentPoints(saved)
-        local maxPts = GetMaxPoints(player)
+        local maxPts = GetMaxPoints(target)
         if spent >= maxPts then
             SendDebug(player, string.format("LearnTalent id=%d blocked-no-points", math.floor(tId)))
-            SendTalentSnapshot(player)
+            SendTalentSnapshot(player, target, resolvedName)
             return
         end
 
@@ -232,24 +306,26 @@ if AIO.AddAddon() then
         if targetRank > maxRank then targetRank = maxRank end
         if targetRank <= before then
             SendDebug(player, string.format("LearnTalent id=%d no-op before=%d target=%d", math.floor(tId), before, targetRank))
-            SendTalentSnapshot(player)
+            SendTalentSnapshot(player, target, resolvedName)
             return
         end
 
         SaveTalentRank(guid, tId, targetRank)
-        ApplyTalentSpellRank(player, talentDef, targetRank)
+        ApplyTalentSpellRank(target, talentDef, targetRank)
 
         local after = LoadPlayerTalents(guid)[tId] or 0
         SendDebug(player, string.format("LearnTalent id=%d before=%d after=%d", math.floor(tId), before, tonumber(after) or 0))
-        SendTalentSnapshot(player)
+        SendTalentSnapshot(player, target, resolvedName)
     end
 
-    function Handlers.ApplyPreviewTalents(player, payload)
+    function Handlers.ApplyPreviewTalents(player, payload, targetName)
         if not player or type(payload) ~= "table" then return end
+        local target, resolvedName = ResolveTarget(player, targetName)
+        if not target then return end
 
-        local guid = player:GetGUIDLow()
+        local guid = target:GetGUIDLow()
         local saved = LoadPlayerTalents(guid)
-        local available = GetMaxPoints(player) - CountSpentPoints(saved)
+        local available = GetMaxPoints(target) - CountSpentPoints(saved)
         if available < 0 then available = 0 end
 
         local totalApplied = 0
@@ -257,7 +333,7 @@ if AIO.AddAddon() then
             local tId = tonumber(talentId)
             local p = tonumber(points) or 0
             if tId and p > 0 then
-                local talentDef = GetTalentDef(player, tId)
+                local talentDef = GetTalentDef(target, tId)
                 if talentDef then
                     local rank = tonumber(saved[tId]) or 0
                     local maxRank = tonumber(talentDef.maxRank) or 0
@@ -274,7 +350,7 @@ if AIO.AddAddon() then
                     local learned = targetRank - rank
                     if learned > 0 then
                         SaveTalentRank(guid, tId, targetRank)
-                        ApplyTalentSpellRank(player, talentDef, targetRank)
+                        ApplyTalentSpellRank(target, talentDef, targetRank)
                         saved[tId] = targetRank
                         totalApplied = totalApplied + learned
                         available = available - learned
@@ -284,27 +360,29 @@ if AIO.AddAddon() then
         end
 
         SendDebug(player, string.format("ApplyPreviewTalents applied=%d", totalApplied))
-        SendTalentSnapshot(player)
+        SendTalentSnapshot(player, target, resolvedName)
     end
 
-    function Handlers.GetResetCost(player)
+    function Handlers.GetResetCost(player, targetName)
         if not player then return end
         SendDebug(player, "GetResetCost")
         AIO.Handle(player, "SurrealTalents", "ShowResetCost", 0)
     end
 
-    function Handlers.ConfirmReset(player)
+    function Handlers.ConfirmReset(player, targetName)
         if not player then return end
+        local target, resolvedName = ResolveTarget(player, targetName)
+        if not target then return end
 
-        player:ResetTalents(true)
-        RemoveAllConfiguredTalentSpells(player)
+        target:ResetTalents(true)
+        RemoveAllConfiguredTalentSpells(target)
         CharDBExecute(string.format(
             "DELETE FROM surreal_talents.talent_ranks WHERE guid = %d",
-            player:GetGUIDLow()))
+            target:GetGUIDLow()))
 
         SendDebug(player, "ConfirmReset executed")
         AIO.Handle(player, "SurrealTalents", "ResetDone", 0)
-        SendTalentSnapshot(player)
+        SendTalentSnapshot(player, target, resolvedName)
     end
 
 end
