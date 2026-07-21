@@ -961,6 +961,23 @@ else
             )
         end
 
+        if classToken == "WARRIOR" then
+            if specIndex == 2 then -- Fury
+                local maxExtraRage = 10
+                local heroicStrikeMul = 2.0
+                local maxRageBonusPct = maPct * heroicStrikeMul
+                local heroicStrikeBonusPct = maPct * heroicStrikeMul
+                return format(
+                    "Fury mastery is driven by Rampage.\nAny damaging ability can spend up to %d extra rage; spending the full amount grants +%.1f%%%% damage (scales down linearly with less rage spent).\nHeroic Strike also gets a flat +%.1f%%%% (2x mastery) bonus on top of that.\nMastery: %.1f%%%%",
+                    maxExtraRage, maxRageBonusPct, heroicStrikeBonusPct, maPct
+                )
+            end
+            return format(
+                "Fury Warrior mastery scaling (Rampage rage-spend damage + Heroic Strike bonus) is active.\nCurrent spec does not use this custom mastery hook.\nCurrent mastery: %.1f%%%% (x%.3f)",
+                maPct, masteryMul
+            )
+        end
+
         return format("%.1f%%%% Mastery (class-specific effect)", maPct)
     end
 

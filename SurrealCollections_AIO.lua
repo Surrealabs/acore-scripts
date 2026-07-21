@@ -52,7 +52,7 @@ if AIO.AddAddon() then
             return w
         elseif catID == "ARMOR" then
             local w = "class=4"
-            if subCatID then w = w .. " AND subclass=" .. subCatID end
+            if subCatID and subCatID ~= "ALL" then w = w .. " AND subclass=" .. subCatID end
             return w
         elseif catID == "CONSUMABLES" then
             return "class=0"
@@ -66,8 +66,6 @@ if AIO.AddAddon() then
             return "class=1"
         elseif catID == "QUEST" then
             return "class=12"
-        elseif catID == "ITEMSETS" then
-            return "itemset > 0"
         elseif catID == "ITEMSETS_CLASS" then
             return "itemset > 0 AND AllowableClass > 0"
         elseif catID == "LEGENDARIES" then
@@ -119,10 +117,6 @@ if AIO.AddAddon() then
         page = page or 1
         if page < 1 then page = 1 end
         local whereClause = nil
-        local playerClassMask = nil
-        if player and player.GetClass then
-            playerClassMask = CLASS_ID_TO_MASK[player:GetClass()]
-        end
 
         -- For glyphs, map class token to subclass
         local classFilter = nil
@@ -137,48 +131,28 @@ if AIO.AddAddon() then
             local classMask = CLASS_MASK[subCatID]
             whereClause = "itemset > 0 AND AllowableClass > 0 AND (AllowableClass & " .. classMask .. ") <> 0"
             subCatID = nil
+        elseif catID == "ARMOR" and subCatID == "NECK" then
+            whereClause = "class=4 AND InventoryType=2"
+            subCatID = nil
+        elseif catID == "ARMOR" and subCatID == "RING" then
+            whereClause = "class=4 AND InventoryType=11"
+            subCatID = nil
+        elseif catID == "ARMOR" and subCatID == "TRINKET" then
+            whereClause = "class=4 AND InventoryType=12"
+            subCatID = nil
+        elseif catID == "ARMOR" and type(subCatID) == "string" and subCatID:match("^MAT:%d+:SLOT:%d+$") then
+            local mat, slot = subCatID:match("^MAT:(%d+):SLOT:(%d+)$")
+            whereClause = "class=4 AND subclass=" .. mat .. " AND InventoryType=" .. slot
+            subCatID = nil
         end
 
         whereClause = whereClause or CategoryWhere(catID, subCatID, classFilter)
-
-        if catID == "ITEMSETS" and playerClassMask then
-            whereClause = whereClause ..
-                " AND (AllowableClass > 0 AND (AllowableClass & " .. playerClassMask .. ") <> 0)"
-        end
-
-        if catID == "ITEMSETS" and subCatID then
-            if subCatID == "T4_70" then
-                whereClause = whereClause .. " AND ItemLevel = 70"
-            elseif subCatID == "T5_79" then
-                whereClause = whereClause .. " AND ItemLevel = 79"
-            elseif subCatID == "T6_89" then
-                whereClause = whereClause .. " AND ItemLevel = 89"
-            elseif subCatID == "T7_99" then
-                whereClause = whereClause .. " AND ItemLevel = 99"
-            elseif subCatID == "T75_109" then
-                whereClause = whereClause .. " AND ItemLevel = 109"
-            elseif subCatID == "T8_129" then
-                whereClause = whereClause .. " AND ItemLevel = 129"
-            elseif subCatID == "T85_149" then
-                whereClause = whereClause .. " AND ItemLevel = 149"
-            elseif subCatID == "T9_159" then
-                whereClause = whereClause .. " AND ItemLevel = 159"
-            elseif subCatID == "T95_169" then
-                whereClause = whereClause .. " AND ItemLevel = 169"
-            elseif subCatID == "T10_179" then
-                whereClause = whereClause .. " AND ItemLevel = 179"
-            elseif subCatID == "T10S_199" then
-                whereClause = whereClause .. " AND ItemLevel = 199"
-            elseif subCatID == "T10_ALL" then
-                whereClause = whereClause .. " AND ItemLevel IN (179, 199)"
-            end
-        end
 
         -- Search filter
         if search and search ~= "" then
             -- Sanitize search
             local safe = search:gsub("'", ""):gsub('"', ""):gsub("\\", "")
-            if catID == "ITEMSETS" then
+            if catID == "ITEMSETS_CLASS" then
                 whereClause = whereClause ..
                     " AND (name LIKE '%" .. safe .. "%'" ..
                     " OR itemset IN (SELECT entry FROM item_set_names" ..
@@ -186,6 +160,58 @@ if AIO.AddAddon() then
             else
                 whereClause = whereClause .. " AND name LIKE '%" .. safe .. "%'"
             end
+        end
+
+        -- Item Sets are paginated by whole SET (group), not by raw item row,
+        -- so a page always holds complete sets and browsing a class never
+        -- requires flipping through dozens of pages to see every tier.
+        if catID == "ITEMSETS_CLASS" then
+            local rows = {}
+            local q = WorldDBQuery(
+                "SELECT entry, name, Quality, ItemLevel, RequiredLevel, " ..
+                "InventoryType, class, subclass, itemset " ..
+                "FROM item_template WHERE " .. whereClause ..
+                " ORDER BY itemset ASC, ItemLevel ASC, InventoryType ASC, name ASC")
+
+            if q then
+                repeat
+                    table.insert(rows, {
+                        q:GetUInt32(0), q:GetString(1), q:GetUInt32(2), q:GetUInt32(3),
+                        q:GetUInt32(4), q:GetUInt32(5), q:GetUInt32(6), q:GetUInt32(7),
+                        q:GetUInt32(8),
+                    })
+                until not q:NextRow()
+            end
+
+            local order  = {}
+            local groups = {}
+            for _, row in ipairs(rows) do
+                local setId = row[9] or 0
+                if not groups[setId] then
+                    groups[setId] = {}
+                    table.insert(order, setId)
+                end
+                table.insert(groups[setId], row)
+            end
+
+            local total = #order
+            local totalPages = math.ceil(total / PAGE_SIZE)
+            if totalPages < 1 then totalPages = 1 end
+            if page > totalPages then page = totalPages end
+
+            local items = {}
+            local startIdx = (page - 1) * PAGE_SIZE + 1
+            local endIdx = math.min(startIdx + PAGE_SIZE - 1, total)
+            for gi = startIdx, endIdx do
+                local setId = order[gi]
+                for _, row in ipairs(groups[setId]) do
+                    table.insert(items, row)
+                end
+            end
+
+            AIO.Handle(player, "SurrealCollections", "ShowItems",
+                catID, page, totalPages, total, items)
+            return
         end
 
         -- Count total
@@ -205,9 +231,6 @@ if AIO.AddAddon() then
         -- Fetch items
         local items = {}
         local orderBy = " ORDER BY ItemLevel DESC, name ASC"
-        if catID == "ITEMSETS" or catID == "ITEMSETS_CLASS" then
-            orderBy = " ORDER BY itemset ASC, ItemLevel ASC, InventoryType ASC, name ASC"
-        end
 
         local q = WorldDBQuery(
             "SELECT entry, name, Quality, ItemLevel, RequiredLevel, " ..
@@ -277,6 +300,9 @@ else
     local ITEMS_PER_PAGE = math.floor(AVAIL_H / CFG.ITEM_H)
     if ITEMS_PER_PAGE < 1 then ITEMS_PER_PAGE = 1 end
 
+    -- Item Sets view: max pieces shown side-by-side on one set's row
+    local MAX_SET_ICONS = 8
+
     -- Quality colors
     local QUALITY_COLORS = {
         [0] = { 0.62, 0.62, 0.62 },  -- Poor (grey)
@@ -292,6 +318,20 @@ else
     -- =================================================================
     --  C A T E G O R Y   D E F I N I T I O N S
     -- =================================================================
+    -- Shared slot list for drilling into a specific armor material (e.g.
+    -- Cloth -> Feet gives "Cloth Boots").
+    local ARMOR_SLOTS = {
+        { id = "1",  label = "Head" },
+        { id = "3",  label = "Shoulder" },
+        { id = "5",  label = "Chest" },
+        { id = "6",  label = "Waist" },
+        { id = "7",  label = "Legs" },
+        { id = "8",  label = "Feet" },
+        { id = "9",  label = "Wrists" },
+        { id = "10", label = "Hands" },
+        { id = "16", label = "Back" },
+    }
+
     local CATEGORIES = {
         { id = "GLYPHS",      label = "Glyphs",       icon = "Interface\\Icons\\INV_Inscription_Tradeskill01",
           subcats = {
@@ -309,11 +349,15 @@ else
         },
         { id = "ARMOR",       label = "Armor",         icon = "Interface\\Icons\\INV_Chest_Chain",
           subcats = {
-            { id = "1",  label = "Cloth" },
-            { id = "2",  label = "Leather" },
-            { id = "3",  label = "Mail" },
-            { id = "4",  label = "Plate" },
+            { id = "ALL", label = "All Slots" },
+            { id = "1",  label = "Cloth",   slots = ARMOR_SLOTS },
+            { id = "2",  label = "Leather", slots = ARMOR_SLOTS },
+            { id = "3",  label = "Mail",    slots = ARMOR_SLOTS },
+            { id = "4",  label = "Plate",   slots = ARMOR_SLOTS },
             { id = "6",  label = "Shield" },
+            { id = "NECK",    label = "Necklace" },
+            { id = "RING",    label = "Ring" },
+            { id = "TRINKET", label = "Trinket" },
             { id = "0",  label = "Miscellaneous" },
           }
         },
@@ -337,23 +381,7 @@ else
           }
         },
         { id = "CONSUMABLES", label = "Consumables",   icon = "Interface\\Icons\\INV_Potion_54" },
-                { id = "ITEMSETS",    label = "Item Sets",     icon = "Interface\\Icons\\INV_Chest_Cloth_17",
-                    subcats = {
-                        { id = "T4_70",    label = "Tier 4 (i70)" },
-                        { id = "T5_79",    label = "Tier 5 (i79)" },
-                        { id = "T6_89",    label = "Tier 6 (i89)" },
-                        { id = "T7_99",    label = "Tier 7 (i99)" },
-                        { id = "T75_109",  label = "Tier 7.5 (i109)" },
-                        { id = "T8_129",   label = "Tier 8 (i129)" },
-                        { id = "T85_149",  label = "Tier 8.5 (i149)" },
-                        { id = "T9_159",   label = "Tier 9 (i159)" },
-                        { id = "T95_169",  label = "Tier 9.5 (i169)" },
-                        { id = "T10_179",  label = "Tier 10 (i179)" },
-                        { id = "T10S_199", label = "T10 Sanctified (i199)" },
-                        { id = "T10_ALL",  label = "T10 All (179+199)" },
-                    }
-                },
-                { id = "ITEMSETS_CLASS", label = "Set by Class", icon = "Interface\\Icons\\INV_Helmet_06",
+                { id = "ITEMSETS_CLASS", label = "Item Sets", icon = "Interface\\Icons\\INV_Chest_Cloth_17",
                     subcats = {
                         { id = "WARRIOR",     label = "Warrior" },
                         { id = "PALADIN",     label = "Paladin" },
@@ -584,6 +612,9 @@ else
     subPanelBg:SetAllPoints()
     subPanelBg:SetTexture(0.10, 0.10, 0.12, 0.5)
 
+    local currentCatData = nil
+    local drillMaterial  = nil
+
     local MAX_SUBCATS = 20
     for si = 1, MAX_SUBCATS do
         local sb = CreateFrame("Button", nil, subPanel)
@@ -608,8 +639,33 @@ else
 
         sb:Hide()
         sb.subID = nil
+        sb.entryData = nil
+        sb.isBack = false
         sb:SetScript("OnClick", function(self)
-            activeSubCat = self.subID
+            if self.isBack then
+                drillMaterial = nil
+                if currentCatData then PopulateSubPanel(currentCatData.subcats) end
+                return
+            end
+
+            local entry = self.entryData
+            if entry and entry.slots then
+                -- Drill into this material's slot list. Default to showing
+                -- the whole material (all slots) until a specific slot is
+                -- picked from the list that replaces this one.
+                drillMaterial = entry
+                activeSubCat = entry.id
+                currentPage = 1
+                PopulateSubPanel(entry.slots, { showBack = true })
+                RequestPage()
+                return
+            end
+
+            if drillMaterial then
+                activeSubCat = "MAT:" .. drillMaterial.id .. ":SLOT:" .. self.subID
+            else
+                activeSubCat = self.subID
+            end
             currentPage = 1
             for _, b in ipairs(subCatBtns) do
                 b.bg:SetTexture(0.15, 0.15, 0.18, 0.4)
@@ -621,20 +677,44 @@ else
         subCatBtns[si] = sb
     end
 
-    function ShowSubCategories(catData)
+    function PopulateSubPanel(list, opts)
+        opts = opts or {}
         for si = 1, MAX_SUBCATS do
             subCatBtns[si]:Hide()
+            subCatBtns[si].entryData = nil
+            subCatBtns[si].isBack = false
+            subCatBtns[si].bg:SetTexture(0.15, 0.15, 0.18, 0.4)
         end
-        if catData.subcats and #catData.subcats > 0 then
-            for si, sc in ipairs(catData.subcats) do
-                if si <= MAX_SUBCATS then
-                    subCatBtns[si].subID = sc.id
-                    subCatBtns[si].label:SetText(sc.label)
-                    subCatBtns[si].bg:SetTexture(0.15, 0.15, 0.18, 0.4)
-                    subCatBtns[si]:Show()
-                end
+
+        local si = 0
+        if opts.showBack then
+            si = si + 1
+            local b = subCatBtns[si]
+            b.subID = nil
+            b.isBack = true
+            b.label:SetText("|cff58a6ff< Back|r")
+            b:Show()
+        end
+
+        for _, sc in ipairs(list) do
+            si = si + 1
+            if si <= MAX_SUBCATS then
+                local b = subCatBtns[si]
+                b.subID = sc.id
+                b.entryData = sc
+                b.label:SetText(sc.label)
+                b:Show()
             end
-            subPanel:Show()
+        end
+
+        subPanel:Show()
+    end
+
+    function ShowSubCategories(catData)
+        currentCatData = catData
+        drillMaterial = nil
+        if catData.subcats and #catData.subcats > 0 then
+            PopulateSubPanel(catData.subcats)
         else
             subPanel:Hide()
         end
@@ -832,6 +912,53 @@ else
             end
         end)
 
+        -- Item Set mode: a horizontal strip of small icon slots on this
+        -- same row, one per piece in the set (up to MAX_SET_ICONS), so a
+        -- whole tier set fits on one row instead of one row per item.
+        row.setIcons = {}
+        for si = 1, MAX_SET_ICONS do
+            local slot = CreateFrame("Button", nil, row)
+            slot:SetSize(CFG.ITEM_H - 4, CFG.ITEM_H - 4)
+            slot:SetPoint("LEFT", 90 + (si - 1) * (CFG.ITEM_H - 2), 0)
+
+            local slotIcon = slot:CreateTexture(nil, "ARTWORK")
+            slotIcon:SetAllPoints()
+            slot.icon = slotIcon
+
+            local slotHL = slot:CreateTexture(nil, "HIGHLIGHT")
+            slotHL:SetAllPoints()
+            slotHL:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+            slotHL:SetBlendMode("ADD")
+            slotHL:SetAlpha(0.25)
+
+            slot.itemEntry = nil
+            slot:SetScript("OnEnter", function(self)
+                if self.itemEntry then
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetHyperlink(
+                        "item:" .. self.itemEntry .. ":0:0:0:0:0:0:0")
+                    GameTooltip:Show()
+                end
+            end)
+            slot:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            slot:SetScript("OnClick", function(self)
+                if self.itemEntry and IsShiftKeyDown() then
+                    local _, link = GetItemInfo(self.itemEntry)
+                    if link then
+                        if ChatFrameEditBox and ChatFrameEditBox:IsShown() then
+                            ChatFrameEditBox:Insert(link)
+                        elseif ChatFrame1EditBox
+                               and ChatFrame1EditBox:IsShown() then
+                            ChatFrame1EditBox:Insert(link)
+                        end
+                    end
+                end
+            end)
+            slot:Hide()
+
+            row.setIcons[si] = slot
+        end
+
         itemRows[ri] = row
     end
 
@@ -886,9 +1013,59 @@ else
         -- Hide all rows first
         for ri = 1, ITEMS_PER_PAGE do
             itemRows[ri]:Hide()
+            for _, slot in ipairs(itemRows[ri].setIcons) do
+                slot:Hide()
+                slot.itemEntry = nil
+            end
         end
 
         if not items then return end
+
+        if activeCat == "ITEMSETS_CLASS" then
+            -- Group pieces by item set so a whole tier set's pieces show
+            -- side-by-side on one row instead of one row per item.
+            local order  = {}
+            local groups = {}
+            for _, item in ipairs(items) do
+                local setId = item[9] or 0
+                if not groups[setId] then
+                    groups[setId] = {}
+                    table.insert(order, setId)
+                end
+                table.insert(groups[setId], item)
+            end
+
+            local ri = 0
+            for _, setId in ipairs(order) do
+                ri = ri + 1
+                if ri > ITEMS_PER_PAGE then break end
+                local row = itemRows[ri]
+                row.itemEntry = nil
+                row.icon:Hide()
+                row.nameText:SetTextColor(1.0, 0.82, 0.0)
+                row.nameText:SetText("Set #" .. setId)
+                row.ilvlText:SetText("")
+                row.reqText:SetText("")
+
+                local pieces = groups[setId]
+                for si, slot in ipairs(row.setIcons) do
+                    local piece = pieces[si]
+                    if piece then
+                        local pEntry = piece[1]
+                        slot.itemEntry = pEntry
+                        local _, _, _, _, _, _, _, _, _, tex = GetItemInfo(pEntry)
+                        slot.icon:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+                        slot:Show()
+                    else
+                        slot:Hide()
+                        slot.itemEntry = nil
+                    end
+                end
+
+                row:Show()
+            end
+            return
+        end
 
         for ri, item in ipairs(items) do
             if ri > ITEMS_PER_PAGE then break end
@@ -898,9 +1075,9 @@ else
             local qual   = item[3] or 1
             local ilvl   = item[4] or 0
             local reqLvl = item[5] or 0
-            local itemSet = item[9] or 0
 
             row.itemEntry = entry
+            row.icon:Show()
 
             -- Color name by quality
             local qc = QUALITY_COLORS[qual] or QUALITY_COLORS[1]
@@ -918,13 +1095,8 @@ else
             row.ilvlText:SetText(ilvl > 0 and ilvl or "")
             row.ilvlText:SetTextColor(0.7, 0.7, 0.7)
 
-            if activeCat == "ITEMSETS" or activeCat == "ITEMSETS_CLASS" then
-                row.reqText:SetText(itemSet > 0 and itemSet or "")
-                row.reqText:SetTextColor(1.0, 0.82, 0.0)
-            else
-                row.reqText:SetText(reqLvl > 0 and reqLvl or "")
-                row.reqText:SetTextColor(0.6, 0.6, 0.6)
-            end
+            row.reqText:SetText(reqLvl > 0 and reqLvl or "")
+            row.reqText:SetTextColor(0.6, 0.6, 0.6)
 
             row:Show()
         end
@@ -938,14 +1110,22 @@ else
         totalPages  = pages
         totalItems  = total
 
-        if catID == "ITEMSETS" or catID == "ITEMSETS_CLASS" then
-            hdrReq:SetText("|cffaaaaccSet|r")
+        if catID == "ITEMSETS_CLASS" then
+            hdrName:SetText("|cffaaaaccItem Set|r")
+            hdrIlvl:SetText("")
+            hdrReq:SetText("")
         else
+            hdrName:SetText("|cffaaaaccName|r")
+            hdrIlvl:SetText("|cffaaaacciLvl|r")
             hdrReq:SetText("|cffaaaaccReq|r")
         end
 
         pageText:SetText(page .. " / " .. pages)
-        totalText:SetText("|cff888888" .. total .. " items|r")
+        if catID == "ITEMSETS_CLASS" then
+            totalText:SetText("|cff888888" .. total .. " sets|r")
+        else
+            totalText:SetText("|cff888888" .. total .. " items|r")
+        end
 
         if page <= 1 then prevBtn:Disable() else prevBtn:Enable() end
         if page >= pages then nextBtn:Disable() else nextBtn:Enable() end

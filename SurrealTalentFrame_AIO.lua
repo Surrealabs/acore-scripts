@@ -390,13 +390,15 @@ else
         local current = ST_previewPoints[talentId] or 0
         local before = current
         local newVal = current + delta
-        if newVal < 0 then newVal = 0 end
         local def = ord[idx].def
         local rank = ST_playerTalents[talentId] or 0
+        -- Negative deltas may queue removal of already-committed points too,
+        -- down to (but not past) fully unlearning the talent.
+        if newVal < -rank then newVal = -rank end
         if rank + newVal > def.maxRank then
             newVal = def.maxRank - rank
         end
-        if newVal <= 0 then
+        if newVal == 0 then
             ST_previewPoints[talentId] = nil
         else
             ST_previewPoints[talentId] = newVal
@@ -446,6 +448,31 @@ else
         end
     end
 
+    -- RemoveTalentRank: sends native packet to server (single point removal)
+    local function RemoveTalentRank(tab, idx)
+        if ST_waitingForServer then
+            PushTalentFeedback("Waiting for server reply...")
+            return
+        end
+
+        local ord = ST_orderedTalents[tab]
+        if not ord or not ord[idx] then return end
+        local talentId = ord[idx].id
+        local currentRank = tonumber(ST_playerTalents[talentId]) or 0
+
+        if currentRank <= 0 then
+            PushTalentFeedback("No points to remove")
+            return
+        end
+
+        if talentId then
+            DebugTalent("Remove request talent=" .. tostring(talentId) .. " rank=" .. tostring(currentRank))
+            SetServerWait(true, "remove")
+            AIO.Handle("SurrealTalents", "RemoveTalentRank", talentId, ST_editTarget)
+            ScheduleTalentRefresh(0.6)
+        end
+    end
+
     -- LearnPreviewTalents: commit all preview points
     local function LearnPreviewTalents(...)
         if ST_waitingForServer then
@@ -457,7 +484,7 @@ else
         for talentId, delta in pairs(ST_previewPoints) do
             local idNum = tonumber(talentId)
             local dNum = tonumber(delta)
-            if idNum and dNum and dNum > 0 then
+            if idNum and dNum and dNum ~= 0 then
                 payload[idNum] = math.floor(dNum)
             end
         end
@@ -1941,7 +1968,8 @@ else
                     return
                 end
 
-                -- Choice node right-click: remove preview point
+                -- Choice node right-click: remove a point (preview queue, or
+                -- instant removal outside preview mode)
                 if partner and button == "RightButton" then
                     if previewMode then
                         local ok, err = AddPreviewTalentPoints(self.tTab, self.tIdx, -1,
@@ -1950,18 +1978,20 @@ else
                             PushTalentFeedback(err)
                         end
                         UpdateTalents()
-                        -- If rank drops to 0, clear selection so both show again
-                        local tg = TalentGroup()
-                        local _, _, _, _, rk, _, _, _, prev =
-                            GetTalentInfo(self.tTab, self.tIdx, false, false, tg)
-                        local dr = rk or 0
-                        if prev and prev > dr then dr = prev end
-                        if dr <= 0 then
-                            local r2, c2 = TalentPos(self.tTab, self.tIdx)
-                            local k2 = self.tTab .. "-" .. r2 .. "-" .. c2
-                            choiceSelected[k2] = nil
-                            UpdateTalents()
-                        end
+                    else
+                        RemoveTalentRank(self.tTab, self.tIdx)
+                    end
+                    -- If rank drops to 0, clear selection so both show again
+                    local tg = TalentGroup()
+                    local _, _, _, _, rk, _, _, _, prev =
+                        GetTalentInfo(self.tTab, self.tIdx, false, false, tg)
+                    local dr = rk or 0
+                    if prev and prev > dr then dr = prev end
+                    if dr <= 0 then
+                        local r2, c2 = TalentPos(self.tTab, self.tIdx)
+                        local k2 = self.tTab .. "-" .. r2 .. "-" .. c2
+                        choiceSelected[k2] = nil
+                        UpdateTalents()
                     end
                     return
                 end
@@ -1989,6 +2019,8 @@ else
                 else
                     if button == "LeftButton" then
                         LearnTalent(self.tTab, self.tIdx)
+                    elseif button == "RightButton" then
+                        RemoveTalentRank(self.tTab, self.tIdx)
                     end
                 end
             end
@@ -2173,10 +2205,13 @@ else
                 btn.tTab    = tab
                 btn.tIdx    = i
 
-                -- In preview mode use previewRank for display
+                -- In preview mode use previewRank for display (covers both
+                -- pending additions and pending removals of committed ranks)
                 local displayRank = rank
-                if previewMode and previewRank and previewRank > rank then
+                local previewDeltaDisplay = 0
+                if previewMode and previewRank and previewRank ~= rank then
                     displayRank = previewRank
+                    previewDeltaDisplay = previewRank - rank
                 end
 
                 -- Choice node handling
@@ -2252,11 +2287,15 @@ else
                 -- Icon
                 btn.icon:SetTexture(iconTex)
 
-                -- Rank label — show preview ranks in orange
-                local isPreview = previewMode and previewRank and previewRank > rank
-                if isPreview then
+                -- Rank label — show preview ranks in orange (additions) or
+                -- with a yellow "-N" delta note (pending removals)
+                local isPreview = previewMode and previewDeltaDisplay ~= 0
+                if previewDeltaDisplay > 0 then
                     btn.rankText:SetText("|cffff8800" .. displayRank ..
                         "|r/" .. maxRank)
+                elseif previewDeltaDisplay < 0 then
+                    btn.rankText:SetText(displayRank .. "/" .. maxRank ..
+                        " |cffffd100" .. previewDeltaDisplay .. "|r")
                 else
                     btn.rankText:SetText(displayRank .. "/" .. maxRank)
                 end
@@ -2541,8 +2580,8 @@ else
             return
         end
 
-        local queued = GetGroupPreviewTalentPointsSpent(false, TalentGroup()) or 0
-        if queued > 0 then
+        local queued = next(ST_previewPoints) ~= nil
+        if queued then
             applyBtn:Show()
             cancelBtn:Show()
         else

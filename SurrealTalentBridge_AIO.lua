@@ -318,6 +318,39 @@ if AIO.AddAddon() then
         SendTalentSnapshot(player, target, resolvedName)
     end
 
+    function Handlers.RemoveTalentRank(player, talentId, targetName)
+        if not player then return end
+        local target, resolvedName = ResolveTarget(player, targetName)
+        if not target then return end
+
+        local guid = target:GetGUIDLow()
+        local tId = tonumber(talentId)
+        if not tId then return end
+
+        local talentDef = GetTalentDef(target, tId)
+        if not talentDef then
+            SendDebug(player, string.format("RemoveTalentRank id=%d missing-def", math.floor(tId)))
+            return
+        end
+
+        local saved = LoadPlayerTalents(guid)
+        local before = tonumber(saved[tId]) or 0
+        if before <= 0 then
+            SendDebug(player, string.format("RemoveTalentRank id=%d no-op already-zero", math.floor(tId)))
+            SendTalentSnapshot(player, target, resolvedName)
+            return
+        end
+
+        local targetRank = before - 1
+
+        SaveTalentRank(guid, tId, targetRank)
+        ApplyTalentSpellRank(target, talentDef, targetRank)
+
+        local after = LoadPlayerTalents(guid)[tId] or 0
+        SendDebug(player, string.format("RemoveTalentRank id=%d before=%d after=%d", math.floor(tId), before, tonumber(after) or 0))
+        SendTalentSnapshot(player, target, resolvedName)
+    end
+
     function Handlers.ApplyPreviewTalents(player, payload, targetName)
         if not player or type(payload) ~= "table" then return end
         local target, resolvedName = ResolveTarget(player, targetName)
@@ -329,6 +362,30 @@ if AIO.AddAddon() then
         if available < 0 then available = 0 end
 
         local totalApplied = 0
+        local totalRemoved = 0
+
+        -- Process removals first so the points they refund are available
+        -- for any additions queued in the same preview payload.
+        for talentId, points in pairs(payload) do
+            local tId = tonumber(talentId)
+            local p = tonumber(points) or 0
+            if tId and p < 0 then
+                local talentDef = GetTalentDef(target, tId)
+                if talentDef then
+                    local rank = tonumber(saved[tId]) or 0
+                    local toRemove = math.min(-math.floor(p), rank)
+                    if toRemove > 0 then
+                        local targetRank = rank - toRemove
+                        SaveTalentRank(guid, tId, targetRank)
+                        ApplyTalentSpellRank(target, talentDef, targetRank)
+                        saved[tId] = targetRank
+                        totalRemoved = totalRemoved + toRemove
+                        available = available + toRemove
+                    end
+                end
+            end
+        end
+
         for talentId, points in pairs(payload) do
             local tId = tonumber(talentId)
             local p = tonumber(points) or 0
@@ -359,7 +416,7 @@ if AIO.AddAddon() then
             end
         end
 
-        SendDebug(player, string.format("ApplyPreviewTalents applied=%d", totalApplied))
+        SendDebug(player, string.format("ApplyPreviewTalents applied=%d removed=%d", totalApplied, totalRemoved))
         SendTalentSnapshot(player, target, resolvedName)
     end
 
