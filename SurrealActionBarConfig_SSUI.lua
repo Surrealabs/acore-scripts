@@ -258,14 +258,14 @@ SURREAL_ACTIONBAR_CONFIG = {
                 name = "Primal Conduit",
                 slots = {403, 8056, 17364, 900067, 900066, 900064, 900065, 51886, 57994, 331, 0, 66842},
                 procRules = {
-                    { watchBuffSpellId=900049, slot=2, swapIconName="Spell_Nature_EarthShock", enabled=true },
-                    { watchBuffSpellId=900048, slot=2, swapIconName="Spell_Frost_FrostShock", enabled=true },
-                    { watchBuffSpellId=900047, slot=2, swapIconName="Ability_Skyreach_Wind_Wall", enabled=true },
-                    { watchBuffSpellId=900046, slot=2, swapIconName="Spell_Fire_FlameShock", enabled=true },
-                    { watchBuffSpellId=900049, slot=1, swapIconName="Spell_Sandbolt", enabled=true },
-                    { watchBuffSpellId=900048, slot=1, swapIconName="INV_Elemental_Crystal_Water", enabled=true },
-                    { watchBuffSpellId=900047, slot=1, swapIconName="Spell_Nature_ChainLightning", enabled=true },
-                    { watchBuffSpellId=900046, slot=1, swapIconName="Spell_Shaman_LavaBurst", enabled=true },
+                    { watchBuffSpellId=900049, targetSpellId=8056, swapIconName="Spell_Nature_EarthShock", enabled=true },
+                    { watchBuffSpellId=900048, targetSpellId=8056, swapIconName="Spell_Frost_FrostShock", enabled=true },
+                    { watchBuffSpellId=900047, targetSpellId=8056, swapIconName="Ability_Skyreach_Wind_Wall", enabled=true },
+                    { watchBuffSpellId=900046, targetSpellId=8056, swapIconName="Spell_Fire_FlameShock", enabled=true },
+                    { watchBuffSpellId=900049, targetSpellId=403, swapIconName="Spell_Sandbolt", enabled=true },
+                    { watchBuffSpellId=900048, targetSpellId=403, swapIconName="INV_Elemental_Crystal_Water", enabled=true },
+                    { watchBuffSpellId=900047, targetSpellId=403, swapIconName="Spell_Nature_ChainLightning", enabled=true },
+                    { watchBuffSpellId=900046, targetSpellId=403, swapIconName="Spell_Shaman_LavaBurst", enabled=true },
                 },
             },  -- Primal Conduit
             [5] = {
@@ -368,11 +368,15 @@ SURREAL_ACTIONBAR_CONFIG = {
                 },
             },  -- Spec 2
             [3] = {
-                name = "Spec 3",
-                slots = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+                name = "Ancient",
+                slots = {5176, 770, 339, 0, 18562, 0, 0, 0, 33786, 5185, 22812, 33891},
                 procRules = {
+                    { watchBuffSpellId=33891, targetSpellId=5176, swapIconName="Ability_Druid_Nourish", enabled=true },
+                    { watchBuffSpellId=33891, targetSpellId=770, swapIconName="Spell_Nature_Preservation", enabled=true },
+                    { watchBuffSpellId=33891, targetSpellId=339, swapIconName="Spell_Nature_ResistNature", enabled=true },
+                    { watchBuffSpellId=33891, targetSpellId=18562, swapIconName="Ability_Druid_Flourish", enabled=true },
                 },
-            },  -- Spec 3
+            },  -- Ancient
             [4] = {
                 name = "Spec 4",
                 slots = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},

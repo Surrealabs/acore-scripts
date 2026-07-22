@@ -427,18 +427,21 @@ else
     -- =================================================================
     --  P R O C   R U L E S   ( C O S M E T I C   I C O N   S W A P )
     -- =================================================================
-    -- procsBySlot[slot] = { rule, rule, ... } -- ALL rules targeting this
-    -- slot (a slot can have multiple rules, e.g. 4 mutually-exclusive
-    -- "forms" each swapping the same slot to a different spell/icon).
-    -- watchToRules[watchBuffSpellId] = { {slot=, rule=}, ... } -- lets
-    -- RefreshProcs pair each ACTIVE buff directly with the ONE specific
-    -- rule that watches it, instead of just knowing "something is active
-    -- for this slot" and guessing which rule's icon to use.
-    local procsBySlot = {}
+    -- Rules target an ABILITY (targetSpellId), not a fixed slot number --
+    -- the player can freely rearrange their bar (see ACTIONBAR_SLOT_CHANGED
+    -- below), so every refresh re-resolves each rule's targetSpellId to
+    -- whichever slot currently holds it (if any) via a fresh spell->slot
+    -- map built from the live bar. This means a proc rule keeps working
+    -- correctly no matter where the player has actually placed that
+    -- ability, instead of silently glowing whatever unrelated spell
+    -- happens to sit in the slot it was originally authored against.
+    --
+    -- watchToRules[watchBuffSpellId] = { rule, rule, ... } -- lets
+    -- RefreshProcs pair each ACTIVE buff directly with the rule(s) that
+    -- watch it (a buff can drive more than one target ability at once).
     local watchToRules = {}
 
     local function RebuildProcIndex(classId, specIndex)
-        procsBySlot = {}
         watchToRules = {}
         local classCfg = SURREAL_ACTIONBAR_CONFIG and SURREAL_ACTIONBAR_CONFIG[classId]
         local specCfg = classCfg and classCfg.specs and classCfg.specs[specIndex]
@@ -446,14 +449,25 @@ else
         if not rules then return end
         for _, rule in ipairs(rules) do
             local watchId = tonumber(rule.watchBuffSpellId)
-            local slot = tonumber(rule.slot)
-            if rule.enabled and watchId and watchId > 0 and slot and slot >= 1 and slot <= SLOT_COUNT then
-                procsBySlot[slot] = procsBySlot[slot] or {}
-                table.insert(procsBySlot[slot], rule)
+            local targetSpellId = tonumber(rule.targetSpellId)
+            if rule.enabled and watchId and watchId > 0 and targetSpellId and targetSpellId > 0 then
                 watchToRules[watchId] = watchToRules[watchId] or {}
-                table.insert(watchToRules[watchId], { slot = slot, rule = rule })
+                table.insert(watchToRules[watchId], rule)
             end
         end
+    end
+
+    -- spellId -> slot currently showing that spell, built fresh each
+    -- refresh from the live action bar (same source CurrentSlots() reads).
+    local function BuildSpellSlotMap()
+        local map = {}
+        for i = 1, SLOT_COUNT do
+            local actionType, id = GetActionInfo(i)
+            if actionType == "spell" and id then
+                map[id] = i
+            end
+        end
+        return map
     end
 
     -- Purely cosmetic icon swap -- the cooldown swipe is
@@ -494,40 +508,49 @@ else
     -- don't clutter the normal buff bar) AND debuffs the watched rule's
     -- buff exists on your current target (for rules built around a
     -- target-applied debuff proc, e.g. a melee "expose" effect -- those
-    -- are combat-only by nature since they require a target).
+    -- are combat-only by nature since they require a target). Every call
+    -- re-resolves each rule's target ability to its CURRENT slot (if any
+    -- is currently placed at all), so a rule never sticks to a stale slot
+    -- after the player rearranges their bar.
     local function RefreshProcs()
         if not next(watchToRules) then
-            for slot in pairs(procsBySlot) do ClearProcVisual(slot) end
+            for slot = 1, SLOT_COUNT do ClearProcVisual(slot) end
             return
         end
 
-        -- [slot] = { rule = <the ONE rule whose watched buff is active>, icon = <that buff's actual icon> }
+        local spellSlotMap = BuildSpellSlotMap()
+
+        -- [slot] = { rule = <the rule whose watched buff is active AND
+        -- whose target ability currently sits in this slot>, icon = <that
+        -- buff's actual icon> }
         local activeForSlot = {}
+
+        local function RecordMatches(spellId, icon)
+            local rules = spellId and watchToRules[spellId]
+            if not rules then return end
+            for _, rule in ipairs(rules) do
+                local slot = spellSlotMap[rule.targetSpellId]
+                if slot then
+                    activeForSlot[slot] = { rule = rule, icon = icon }
+                end
+            end
+        end
+
         for i = 1, 40 do
             local name, _, icon, _, _, _, _, _, _, _, spellId = UnitBuff("player", i, "HELPFUL|PASSIVE")
             if not name then break end
-            local matches = spellId and watchToRules[spellId]
-            if matches then
-                for _, m in ipairs(matches) do
-                    activeForSlot[m.slot] = { rule = m.rule, icon = icon }
-                end
-            end
+            RecordMatches(spellId, icon)
         end
 
         if UnitExists("target") then
             for i = 1, 40 do
                 local name, _, icon, _, _, _, _, _, _, _, spellId = UnitDebuff("target", i, "PLAYER")
                 if not name then break end
-                local matches = spellId and watchToRules[spellId]
-                if matches then
-                    for _, m in ipairs(matches) do
-                        activeForSlot[m.slot] = { rule = m.rule, icon = icon }
-                    end
-                end
+                RecordMatches(spellId, icon)
             end
         end
 
-        for slot in pairs(procsBySlot) do
+        for slot = 1, SLOT_COUNT do
             local active = activeForSlot[slot]
             if active then
                 ApplyProcVisual(slot, active.rule, active.icon)
@@ -749,23 +772,25 @@ else
             "|cff33ff99SurrealActionBar:|r proc rules (class %s, spec %s):",
             tostring(lastClassId), tostring(lastSpecIndex)))
         local any = false
-        for slot, rules in pairs(procsBySlot) do
-            local ov = overlays[slot]
+        local spellSlotMap = BuildSpellSlotMap()
+        for watchId, rules in pairs(watchToRules) do
             for _, rule in ipairs(rules) do
                 any = true
+                local slot = spellSlotMap[rule.targetSpellId]
+                local ov = slot and overlays[slot]
                 DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                    "  slot %d watches spellId %s -> swap icon to %s (enabled=%s, currently active=%s)",
-                    slot, tostring(rule.watchBuffSpellId), tostring(rule.swapIconName),
-                    tostring(rule.enabled), tostring(ov and ov.procActive)))
-            end
-            if ov then
-                DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                    "    swap texture: shown=%s texture=%s alpha=%.2f",
-                    tostring(ov.swap:IsShown()), tostring(ov.swap:GetTexture()), ov.swap:GetAlpha()))
-                DEFAULT_CHAT_FRAME:AddMessage(string.format(
-                    "    button: level=%s strata=%s | cooldownFrame: level=%s strata=%s",
-                    tostring(ov.btn:GetFrameLevel()), tostring(ov.btn:GetFrameStrata()),
-                    tostring(ov.cooldownFrame and ov.cooldownFrame:GetFrameLevel()), tostring(ov.cooldownFrame and ov.cooldownFrame:GetFrameStrata())))
+                    "  watches spellId %s -> swap ability %s's icon to %s (currently slot=%s, enabled=%s, currently active=%s)",
+                    tostring(watchId), tostring(rule.targetSpellId), tostring(rule.swapIconName),
+                    tostring(slot or "not on bar"), tostring(rule.enabled), tostring(ov and ov.procActive)))
+                if ov then
+                    DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                        "    swap texture: shown=%s texture=%s alpha=%.2f",
+                        tostring(ov.swap:IsShown()), tostring(ov.swap:GetTexture()), ov.swap:GetAlpha()))
+                    DEFAULT_CHAT_FRAME:AddMessage(string.format(
+                        "    button: level=%s strata=%s | cooldownFrame: level=%s strata=%s",
+                        tostring(ov.btn:GetFrameLevel()), tostring(ov.btn:GetFrameStrata()),
+                        tostring(ov.cooldownFrame and ov.cooldownFrame:GetFrameLevel()), tostring(ov.cooldownFrame and ov.cooldownFrame:GetFrameStrata())))
+                end
             end
         end
         if not any then
