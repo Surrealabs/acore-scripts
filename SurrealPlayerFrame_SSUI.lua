@@ -1,9 +1,9 @@
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     -- Server side: nothing needed
 else
-    -- Client side: pushed to all players via AIO
+    -- Client side: pushed to all players via SSUI
 
 local function IsDemonologyWarlock()
     local _, class = UnitClass("player")
@@ -38,6 +38,6 @@ surrealPlayerFrame:SetScript("OnEvent", function()
     SurrealPlayerFrame_UpdateManaBar()
 end)
 
-DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[SurrealUI]|r PlayerFrame loaded via AIO.")
+DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[SurrealUI]|r PlayerFrame loaded via SSUI.")
 
-end -- AIO client block
+end -- SSUI client block

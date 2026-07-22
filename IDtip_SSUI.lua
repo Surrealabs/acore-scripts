@@ -1,9 +1,9 @@
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     -- Server side: nothing needed
 else
-    -- Client side: pushed to all players via AIO
+    -- Client side: pushed to all players via SSUI
 
 local hooksecurefunc, select, UnitBuff, UnitDebuff, UnitAura, UnitGUID, GetGlyphSocketInfo, tonumber, strfind =
       hooksecurefunc, select, UnitBuff, UnitDebuff, UnitAura, UnitGUID, GetGlyphSocketInfo, tonumber, strfind
@@ -120,6 +120,6 @@ ItemRefTooltip:HookScript("OnTooltipSetItem", attachItemTooltip)
 ShoppingTooltip1:HookScript("OnTooltipSetItem", attachItemTooltip)
 ShoppingTooltip2:HookScript("OnTooltipSetItem", attachItemTooltip)
 
-DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[SurrealUI]|r IDtip loaded via AIO.")
+DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[SurrealUI]|r IDtip loaded via SSUI.")
 
-end -- AIO client block
+end -- SSUI client block

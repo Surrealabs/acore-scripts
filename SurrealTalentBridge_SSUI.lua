@@ -1,8 +1,8 @@
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     if not SURREAL_TALENT_TREES then
-        pcall(dofile, "lua_scripts/SurrealTalentConfig_AIO.lua")
+        pcall(dofile, "lua_scripts/SurrealTalentConfig_SSUI.lua")
     end
 
     local SERVER_DEBUG = false
@@ -178,13 +178,13 @@ if AIO.AddAddon() then
         if unspent < 0 then unspent = 0 end
         local tabInfo = BuildTabInfo(target, talents)
 
-        AIO.Handle(player, "SurrealTalents", "ReceiveTalents", talents, spent, maxPts, unspent, tabInfo,
+        SSUI.Handle(player, "SurrealTalents", "ReceiveTalents", talents, spent, maxPts, unspent, tabInfo,
                    targetName, target:GetClass())
     end
 
     local function SendDebug(player, message)
         if not SERVER_DEBUG or not player then return end
-        AIO.Handle(player, "SurrealTalents", "Debug", message)
+        SSUI.Handle(player, "SurrealTalents", "Debug", message)
     end
 
     -- Resolves an optional "editing a bot" target. Only allows targeting a
@@ -212,24 +212,24 @@ if AIO.AddAddon() then
         return target, targetName
     end
 
-    local Handlers = AIO.AddHandlers("SurrealTalents", {})
+    local Handlers = SSUI.AddHandlers("SurrealTalents", {})
 
     function Handlers.RequestTalents(player, targetName)
         SendDebug(player, "RequestTalents")
         local target, resolvedName = ResolveTarget(player, targetName)
         if not target then
-            AIO.Handle(player, "SurrealTalents", "ReceiveTalents", {}, 0, 0, 0, {}, targetName, 0)
+            SSUI.Handle(player, "SurrealTalents", "ReceiveTalents", {}, 0, 0, 0, {}, targetName, 0)
             return
         end
         SendTalentSnapshot(player, target, resolvedName)
     end
 
-    -- Separate AIO channel for the Army panel's own lightweight read-only
+    -- Separate SSUI channel for the Army panel's own lightweight read-only
     -- Talents tab preview (can't reuse "SurrealTalents" for registration —
-    -- AIO.AddHandlers asserts if a name is registered twice on the same
-    -- side, and SurrealTalentFrame_AIO.lua already owns the client-side
+    -- SSUI.AddHandlers asserts if a name is registered twice on the same
+    -- side, and SurrealTalentFrame_SSUI.lua already owns the client-side
     -- "SurrealTalents" handlers).
-    local ArmyTalentHandlers = AIO.AddHandlers("SurrealArmyTalents", {})
+    local ArmyTalentHandlers = SSUI.AddHandlers("SurrealArmyTalents", {})
 
     -- Used by the Army panel's Talents tab: fetch another live character's
     -- (bot's) custom talent picks, or the master's own if targetName matches.
@@ -246,7 +246,7 @@ if AIO.AddAddon() then
         end
 
         if not target then
-            AIO.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName, {}, 0, 0, 0, {}, 0)
+            SSUI.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName, {}, 0, 0, 0, {}, 0)
             return
         end
 
@@ -259,7 +259,7 @@ if AIO.AddAddon() then
         local tabInfo = BuildTabInfo(target, talents)
         local classId = target:GetClass()
 
-        AIO.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName,
+        SSUI.Handle(player, "SurrealArmyTalents", "ReceiveBotTalents", targetName,
                    talents, spent, maxPts, unspent, tabInfo, classId)
     end
 
@@ -423,7 +423,7 @@ if AIO.AddAddon() then
     function Handlers.GetResetCost(player, targetName)
         if not player then return end
         SendDebug(player, "GetResetCost")
-        AIO.Handle(player, "SurrealTalents", "ShowResetCost", 0)
+        SSUI.Handle(player, "SurrealTalents", "ShowResetCost", 0)
     end
 
     function Handlers.ConfirmReset(player, targetName)
@@ -438,7 +438,7 @@ if AIO.AddAddon() then
             target:GetGUIDLow()))
 
         SendDebug(player, "ConfirmReset executed")
-        AIO.Handle(player, "SurrealTalents", "ResetDone", 0)
+        SSUI.Handle(player, "SurrealTalents", "ResetDone", 0)
         SendTalentSnapshot(player, target, resolvedName)
     end
 

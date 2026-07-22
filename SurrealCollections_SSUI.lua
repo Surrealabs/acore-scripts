@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- SurrealCollections_AIO.lua
+-- SurrealCollections_SSUI.lua
 --
 -- An in-game item collection browser (like AtlasLoot).
 -- Categories: Glyphs, Weapons, Armor, Consumables, Recipes, etc.
@@ -10,13 +10,13 @@
 --   Also accessible from a micro-button hook or keybind (Shift-P)
 -------------------------------------------------------------------------------
 
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     ---------------------------------------------------------------------------
     -- SERVER SIDE
     ---------------------------------------------------------------------------
-    local Handlers = AIO.AddHandlers("SurrealCollections", {})
+    local Handlers = SSUI.AddHandlers("SurrealCollections", {})
 
     -- =====================================================================
     --  Category definitions (server-side mirrors of client categories)
@@ -209,7 +209,7 @@ if AIO.AddAddon() then
                 end
             end
 
-            AIO.Handle(player, "SurrealCollections", "ShowItems",
+            SSUI.Handle(player, "SurrealCollections", "ShowItems",
                 catID, page, totalPages, total, items)
             return
         end
@@ -256,7 +256,7 @@ if AIO.AddAddon() then
             until not q:NextRow()
         end
 
-        AIO.Handle(player, "SurrealCollections", "ShowItems",
+        SSUI.Handle(player, "SurrealCollections", "ShowItems",
             catID, page, totalPages, total, items)
     end
 
@@ -266,14 +266,14 @@ if AIO.AddAddon() then
         -- Send the item directly to player to cache it
         local link = "|cffffffff|Hitem:" .. itemID ..
             ":0:0:0:0:0:0:0:0|h[Item]|h|r"
-        AIO.Handle(player, "SurrealCollections", "CacheItem", itemID)
+        SSUI.Handle(player, "SurrealCollections", "CacheItem", itemID)
     end
 
 else
     ---------------------------------------------------------------------------
     -- CLIENT SIDE
     ---------------------------------------------------------------------------
-    local ClientHandlers = AIO.AddHandlers("SurrealCollections", {})
+    local ClientHandlers = SSUI.AddHandlers("SurrealCollections", {})
 
     -- =================================================================
     --  C O N F I G
@@ -1005,7 +1005,7 @@ else
     -- =================================================================
     function RequestPage()
         if not activeCat then return end
-        AIO.Handle("SurrealCollections", "Browse",
+        SSUI.Handle("SurrealCollections", "Browse",
             activeCat, activeSubCat, currentPage, searchText)
     end
 

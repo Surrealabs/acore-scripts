@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- SurrealSpellBook_AIO.lua
+-- SurrealSpellBook_SSUI.lua
 --
 -- Custom spellbook panel replacing the default Blizzard spellbook.
 -- Displays all known spells organized by spell school/tab.
@@ -10,9 +10,9 @@
 --   Hides talent/collections/character when opened (mutual exclusion)
 -------------------------------------------------------------------------------
 
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     -- Server side: nothing needed — spellbook is entirely client-side
 else
     ---------------------------------------------------------------------------

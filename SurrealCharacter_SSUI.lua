@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- SurrealCharacter_AIO.lua
+-- SurrealCharacter_SSUI.lua
 --
 -- Custom character panel replacing the default Blizzard character frame.
 -- Entirely client‑side. Equipment interaction uses native PickupInventoryItem
@@ -15,13 +15,13 @@
 -- Keybind: C (ToggleCharacter override) | /char
 -------------------------------------------------------------------------------
 
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     -- =====================================================================
     --  S E R V E R  S I D E  –  send known titles to client
     -- =====================================================================
-    local SCharHandlers = AIO.AddHandlers("SurrealChar", {})
+    local SCharHandlers = SSUI.AddHandlers("SurrealChar", {})
 
     function SCharHandlers.RequestTitles(player)
         local titles = {}
@@ -32,7 +32,7 @@ if AIO.AddAddon() then
                 table.insert(titles, entry)
             end
         end
-        AIO.Handle(player, "SurrealChar", "ReceiveTitles", titles)
+        SSUI.Handle(player, "SurrealChar", "ReceiveTitles", titles)
     end
 
     -- Send titles on login
@@ -1466,7 +1466,7 @@ else
     -- =================================================================
     --  A I O   H A N D L E R S  (receive data from server)
     -- =================================================================
-    local SurrealCharCli = AIO.AddHandlers("SurrealChar", {})
+    local SurrealCharCli = SSUI.AddHandlers("SurrealChar", {})
 
     function SurrealCharCli.ReceiveTitles(player, titles)
         knownTitleIDs = titles or {}

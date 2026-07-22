@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- SurrealSpec_AIO.lua
+-- SurrealSpec_SSUI.lua
 --
 -- Wowhead-style talent string import/export via chat commands.
 -- Players can export their current build, import a build, and apply it
@@ -15,13 +15,13 @@
 -- Example: "302023013-305053000520310053120501-0"
 -------------------------------------------------------------------------------
 
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     ---------------------------------------------------------------------------
     -- SERVER SIDE
     ---------------------------------------------------------------------------
-    local Handlers = AIO.AddHandlers("SurrealSpec", {})
+    local Handlers = SSUI.AddHandlers("SurrealSpec", {})
 
     -- Class ID → ordered talent tab IDs (same order as Wowhead)
     local CLASS_TABS = {

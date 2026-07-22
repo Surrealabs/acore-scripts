@@ -1,8 +1,8 @@
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     -- SERVER SIDE
-    local Handlers = AIO.AddHandlers("SurrealArmy", {})
+    local Handlers = SSUI.AddHandlers("SurrealArmy", {})
 
     function Handlers.RequestAlts(player)
         if not player then
@@ -25,7 +25,7 @@ if AIO.AddAddon() then
             until not result:NextRow()
         end
         
-        AIO.Handle(player, "SurrealArmy", "ReceiveAlts", altStr)
+        SSUI.Handle(player, "SurrealArmy", "ReceiveAlts", altStr)
     end
 
     function Handlers.SpawnBot(player, botName)
@@ -63,7 +63,7 @@ if AIO.AddAddon() then
         end
 
         if not target then
-            AIO.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName, "", "")
+            SSUI.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName, "", "")
             return
         end
 
@@ -93,7 +93,7 @@ if AIO.AddAddon() then
             end
         end
 
-        AIO.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName,
+        SSUI.Handle(player, "SurrealArmy", "ReceiveBotInventory", targetName,
                    table.concat(equipParts, "|"), table.concat(bagParts, "|"))
     end
 
@@ -119,7 +119,7 @@ if AIO.AddAddon() then
     end
 else
     -- CLIENT SIDE
-    local ArmyHandlers = AIO.AddHandlers("SurrealArmy", {})
+    local ArmyHandlers = SSUI.AddHandlers("SurrealArmy", {})
     
     function ArmyHandlers.ReceiveAlts(player, altStr)
         -- Parse string format: "guid1:name1:level1:class1|guid2:name2:level2:class2|..."
@@ -187,7 +187,7 @@ else
         if CharacterFrame and CharacterFrame:IsShown() then
             CharacterFrame:Hide()
         end
-        AIO.Handle("SurrealArmy", "RequestAlts")
+        SSUI.Handle("SurrealArmy", "RequestAlts")
 
         -- After a short delay, sync slot spawned state with current party members
         local syncTimer = CreateFrame("Frame")
@@ -345,7 +345,7 @@ else
     centerModel:SetUnit("player")
 
     -- ── Equipped gear — paperdoll-style left/right/bottom slot columns ──
-    -- Same spacing convention as SurrealCharacter_AIO.lua's equipment slots.
+    -- Same spacing convention as SurrealCharacter_SSUI.lua's equipment slots.
     local SLOT_SIZE = 40
     local SLOT_GAP  = 6
     local SLOT_STEP = SLOT_SIZE + SLOT_GAP
@@ -431,14 +431,14 @@ else
 
         btn:SetScript("OnClick", function(self)
             if self.entry and bagsCurrentInteractive and bagsCurrentName then
-                AIO.Handle("SurrealArmy", "UnequipBotItem", bagsCurrentName, self.slot)
+                SSUI.Handle("SurrealArmy", "UnequipBotItem", bagsCurrentName, self.slot)
                 local t = CreateFrame("Frame")
                 t.elapsed = 0
                 t:SetScript("OnUpdate", function(f, dt)
                     f.elapsed = f.elapsed + dt
                     if f.elapsed >= 0.4 then
                         f:SetScript("OnUpdate", nil)
-                        AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                        SSUI.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
                     end
                 end)
             end
@@ -502,7 +502,7 @@ else
         end
     end)
 
-    -- ── Zone layout — mirrors SurrealTalentFrame_AIO.lua's class/spec/hero
+    -- ── Zone layout — mirrors SurrealTalentFrame_SSUI.lua's class/spec/hero
     -- tree split so this preview lines up the same way as the real editor.
     local SPEC_COL_START  = 3
     local SPEC_COLS       = 7
@@ -672,14 +672,14 @@ else
 
         btn:SetScript("OnClick", function(self)
             if self.entry and bagsCurrentInteractive and bagsCurrentName then
-                AIO.Handle("SurrealArmy", "EquipBotItem", bagsCurrentName, self.bag, self.slot)
+                SSUI.Handle("SurrealArmy", "EquipBotItem", bagsCurrentName, self.bag, self.slot)
                 local t = CreateFrame("Frame")
                 t.elapsed = 0
                 t:SetScript("OnUpdate", function(f, dt)
                     f.elapsed = f.elapsed + dt
                     if f.elapsed >= 0.4 then
                         f:SetScript("OnUpdate", nil)
-                        AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                        SSUI.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
                     end
                 end)
             end
@@ -696,14 +696,14 @@ else
     autoEquipBtn:SetText("Auto-Equip Best")
     autoEquipBtn:SetScript("OnClick", function()
         if bagsCurrentInteractive and bagsCurrentName then
-            AIO.Handle("SurrealArmy", "AutoEquipBot", bagsCurrentName)
+            SSUI.Handle("SurrealArmy", "AutoEquipBot", bagsCurrentName)
             local t = CreateFrame("Frame")
             t.elapsed = 0
             t:SetScript("OnUpdate", function(f, dt)
                 f.elapsed = f.elapsed + dt
                 if f.elapsed >= 0.5 then
                     f:SetScript("OnUpdate", nil)
-                    AIO.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
+                    SSUI.Handle("SurrealArmy", "RequestBotInventory", bagsCurrentName)
                 end
             end)
         end
@@ -788,7 +788,7 @@ else
             return
         end
         UpdateBagsDisplay(name, interactive, nil, nil) -- show "Loading..."
-        AIO.Handle("SurrealArmy", "RequestBotInventory", name)
+        SSUI.Handle("SurrealArmy", "RequestBotInventory", name)
     end
     _G.SurrealArmyRequestBagsFor = RequestBagsFor
 
@@ -886,7 +886,7 @@ else
     -- TALENT DISPLAY — driven by the custom talent system (SURREAL_TALENT_TREES
     -- + server-pushed talent ranks). This server replaced Blizzard's native
     -- talent trees, so the native inspect-based talent API has no useful
-    -- data; see SurrealTalentBridge_AIO.lua for the equivalent server logic.
+    -- data; see SurrealTalentBridge_SSUI.lua for the equivalent server logic.
     --------------------------------------------------------------------------
     local talentsCurrentName = nil
 
@@ -1021,14 +1021,14 @@ else
             return
         end
         UpdateTalentDisplay(name, nil, nil) -- show "loading..."
-        AIO.Handle("SurrealArmyTalents", "RequestBotTalents", name)
+        SSUI.Handle("SurrealArmyTalents", "RequestBotTalents", name)
     end
     _G.SurrealArmyRequestTalentsFor = RequestTalentsFor
 
-    -- Dedicated AIO channel (NOT "SurrealTalents" — that name is already
-    -- registered client-side by SurrealTalentFrame_AIO.lua, and AIO.AddHandlers
+    -- Dedicated SSUI channel (NOT "SurrealTalents" — that name is already
+    -- registered client-side by SurrealTalentFrame_SSUI.lua, and SSUI.AddHandlers
     -- asserts/errors if the same name is registered twice on the same side).
-    local ArmyTalentHandlers = AIO.AddHandlers("SurrealArmyTalents", {})
+    local ArmyTalentHandlers = SSUI.AddHandlers("SurrealArmyTalents", {})
     function ArmyTalentHandlers.ReceiveBotTalents(player, targetName, talents, spent, maxPts, unspent, tabInfo, classId)
         if targetName == talentsCurrentName then
             UpdateTalentDisplay(targetName, talents or {}, classId)
@@ -1076,7 +1076,7 @@ else
     dismissLabel:SetText("|cffff6666Dismiss|r")
 
     dismissAllBtn:SetScript("OnClick", function()
-        AIO.Handle("SurrealArmy", "DismissBot", "")
+        SSUI.Handle("SurrealArmy", "DismissBot", "")
         -- Reset all alt slots to empty
         if _G.SurrealArmyBotSlots then
             for i = 2, MAX_BOTS do
@@ -1251,7 +1251,7 @@ else
             dismissBtn:SetScript("OnClick", function()
                 local altName = slot.ddText:GetText()
                 if altName and altName ~= "Select Alt" then
-                    AIO.Handle("SurrealArmy", "DismissBot", altName)
+                    SSUI.Handle("SurrealArmy", "DismissBot", altName)
                 end
                 -- Reset slot to empty state
                 slot.isSpawned = false
@@ -1281,7 +1281,7 @@ else
             spawnBtn:SetScript("OnClick", function()
                 local altName = slot.ddText:GetText()
                 if altName and altName ~= "Select Alt" then
-                    AIO.Handle("SurrealArmy", "SpawnBot", altName)
+                    SSUI.Handle("SurrealArmy", "SpawnBot", altName)
                     slot.isSpawned = true
                     spawnBtn:Hide()
                     dismissBtn:Show()

@@ -1,5 +1,5 @@
 -------------------------------------------------------------------------------
--- SurrealTalentFrame_AIO.lua
+-- SurrealTalentFrame_SSUI.lua
 --
 -- Replaces the default WoTLK talent frame with a modern, wider layout.
 -- Talent grid positions are read directly from the DBC (TierID / ColumnIndex).
@@ -14,13 +14,13 @@
 --   Edit CFG for grid dimensions, button size, spacing, and colours.
 -------------------------------------------------------------------------------
 
-local AIO = AIO or require("AIO")
+local SSUI = SSUI or require("SSUI")
 
-if AIO.AddAddon() then
+if SSUI.AddAddon() then
     ---------------------------------------------------------------------------
     -- SERVER SIDE
-    -- Server logic has been moved to SurrealTalentServer_AIO.lua.
-    -- This block is intentionally empty — AIO.AddAddon() returns true on
+    -- Server logic has been moved to SurrealTalentServer_SSUI.lua.
+    -- This block is intentionally empty — SSUI.AddAddon() returns true on
     -- the server, so the client-side code below won't run there.
     ---------------------------------------------------------------------------
 
@@ -49,7 +49,7 @@ else
         end
     end
 
-    -- The server sends us talent state via AIO; we store it here.
+    -- The server sends us talent state via SSUI; we store it here.
     local ST_playerTalents   = {}   -- {talentId = rank}
     local ST_spent           = 0
     local ST_maxPoints       = 0
@@ -60,6 +60,21 @@ else
     local ST_dataReady       = false
     local ST_waitingForServer = false
     local ST_waitReason = nil
+
+    -- Other client scripts (e.g. SurrealActionBar_SSUI.lua) only PULL spec
+    -- state via SurrealTalent_GetCommittedSpec() when THEY think something
+    -- changed (login, a talent-point spend, leaving combat). But the real
+    -- talent data backing that function arrives asynchronously (a server
+    -- round-trip via RequestTalentsFromServer()/ReceiveTalents, or the
+    -- delayed ScheduleTalentRefresh timer) -- often well AFTER those pull
+    -- events already fired and found nothing. PUSH a notification once
+    -- real per-tab data actually lands so listeners can re-check
+    -- immediately instead of waiting for their own next unrelated event.
+    local function NotifyTalentDataReady()
+        if type(_G.SurrealActionBar_OnTalentDataReady) == "function" then
+            pcall(_G.SurrealActionBar_OnTalentDataReady)
+        end
+    end
 
     -- Build ordered talent lists from tree config (sorted by row, col)
     -- These are indexed by [tabIdx][orderedIndex] = {talentId, def}
@@ -195,6 +210,7 @@ else
         ST_tabPointInfo = tabs
         ST_dataReady = true
         if UpdateTalents then UpdateTalents() end
+        NotifyTalentDataReady()
     end
 
     local RequestTalentsFromServer
@@ -443,7 +459,7 @@ else
         if talentId then
             DebugTalent("Learn request talent=" .. tostring(talentId) .. " rank=" .. tostring(currentRank))
             SetServerWait(true, "learn")
-            AIO.Handle("SurrealTalents", "LearnTalent", talentId, currentRank, ST_editTarget)
+            SSUI.Handle("SurrealTalents", "LearnTalent", talentId, currentRank, ST_editTarget)
             ScheduleTalentRefresh(0.6)
         end
     end
@@ -468,7 +484,7 @@ else
         if talentId then
             DebugTalent("Remove request talent=" .. tostring(talentId) .. " rank=" .. tostring(currentRank))
             SetServerWait(true, "remove")
-            AIO.Handle("SurrealTalents", "RemoveTalentRank", talentId, ST_editTarget)
+            SSUI.Handle("SurrealTalents", "RemoveTalentRank", talentId, ST_editTarget)
             ScheduleTalentRefresh(0.6)
         end
     end
@@ -494,7 +510,7 @@ else
             for _ in pairs(payload) do queuedCount = queuedCount + 1 end
             DebugTalent("Apply clicked, queued talents=" .. tostring(queuedCount))
             SetServerWait(true, "apply")
-            AIO.Handle("SurrealTalents", "ApplyPreviewTalents", payload, ST_editTarget)
+            SSUI.Handle("SurrealTalents", "ApplyPreviewTalents", payload, ST_editTarget)
             ScheduleTalentRefresh(0.6)
         end
         ST_previewPoints = {}
@@ -535,7 +551,7 @@ else
     -- Request talents from server on frame open
     RequestTalentsFromServer = function()
         DebugTalent("RequestTalents target=" .. tostring(ST_editTarget))
-        AIO.Handle("SurrealTalents", "RequestTalents", ST_editTarget)
+        SSUI.Handle("SurrealTalents", "RequestTalents", ST_editTarget)
     end
 
     -- =================================================================
@@ -659,8 +675,8 @@ else
         end
     end
 
-    -- AIO handlers for server → client messages
-    local ClientHandlers = AIO.AddHandlers("SurrealTalents", {})
+    -- SSUI handlers for server → client messages
+    local ClientHandlers = SSUI.AddHandlers("SurrealTalents", {})
 
     -- =================================================================
     --  H E L P E R S
@@ -781,7 +797,17 @@ else
         return nil
     end
 
-    -- Returns the tab where talent #1 (mastery) has rank > 0, or nil
+    -- Returns the tab where the mastery-flagged talent has rank > 0, or
+    -- nil. NOTE: this MUST stay keyed off the per-tab `mastery=true` flag
+    -- (not "any points spent in this tab") -- several custom trees (e.g.
+    -- Shaman's placeholder Elemental/Enhancement/Restoration tabs) are
+    -- literal duplicates of "Primal Conduit"'s early talent IDs, so a
+    -- generic "any points in this tab" check would false-positive on the
+    -- FIRST placeholder tab as soon as the player's real tab-4 progress
+    -- shares those same talent IDs. The actual bug (see 2026-07-22
+    -- follow-up #5/#6 notes) was that some custom trees flagged their
+    -- DEEPEST/capstone talent as `mastery=true` instead of an early one --
+    -- fixed in SurrealTalentConfig_SSUI.lua's data, not here.
     local function GetCommittedSpec()
         for tab = 1, GetNumTalentTabs() do
             local masteryIdx = GetMasteryTalentIndex(tab)
@@ -796,6 +822,15 @@ else
     -- Is a spec active (committed or chosen via overlay)?
     local function HasSpec()
         return GetCommittedSpec() or chosenSpecTab
+    end
+
+    -- Exposes committed-spec detection for other client scripts (e.g. the
+    -- custom action bar, SurrealActionBar_SSUI.lua) to reuse instead of
+    -- re-implementing spec detection. Returns classId, specIndex (1-based
+    -- tab) — specIndex is nil if the player hasn't committed to a spec yet
+    -- (no mastery talent has rank > 0 in any tab).
+    _G.SurrealTalent_GetCommittedSpec = function()
+        return ST_classId, GetCommittedSpec()
     end
 
     -- =================================================================
@@ -1487,7 +1522,7 @@ else
                 local enabled, gType, spellID = GetGlyphSocketInfo(self.socketIdx)
                 if spellID and spellID > 0 then
                     -- Socket indices: client uses 1-6, server uses 0-5
-                    AIO.Handle("SurrealTalents", "RemoveGlyph",
+                    SSUI.Handle("SurrealTalents", "RemoveGlyph",
                         self.socketIdx - 1)
                 end
             end
@@ -1601,7 +1636,7 @@ else
         pb:SetScript("OnClick", function(self)
             if self.itemID and pendingSocketIdx then
                 -- Send to server: apply glyph (server uses 0-5)
-                AIO.Handle("SurrealTalents", "ApplyGlyph",
+                SSUI.Handle("SurrealTalents", "ApplyGlyph",
                     self.itemID, pendingSocketIdx - 1)
                 glyphPicker:Hide()
             end
@@ -2451,7 +2486,7 @@ else
         end
         -- Ask server for reset cost
         SetServerWait(true, "reset-cost")
-        AIO.Handle("SurrealTalents", "GetResetCost", ST_editTarget)
+        SSUI.Handle("SurrealTalents", "GetResetCost", ST_editTarget)
     end)
 
     -- Confirmation dialog (static popup style)
@@ -2461,7 +2496,7 @@ else
         button2 = "Cancel",
         OnAccept = function()
             SetServerWait(true, "reset")
-            AIO.Handle("SurrealTalents", "ConfirmReset", ST_editTarget)
+            SSUI.Handle("SurrealTalents", "ConfirmReset", ST_editTarget)
         end,
         timeout = 0,
         whileDead = false,
@@ -2517,6 +2552,7 @@ else
         chosenSpecTab = nil  -- talents reset, back to spec choice
         chosenHeroTree = nil
         UpdateTalents()
+        NotifyTalentDataReady()
         RequestTalentsFromServer()
         ScheduleTalentRefresh(0.6)
     end
@@ -2546,6 +2582,7 @@ else
         ST_previewSpent = 0
         ST_dataReady = true
         if UpdateTalents then UpdateTalents() end
+        NotifyTalentDataReady()
     end
 
     function ClientHandlers.Debug(player, msg)
@@ -2596,8 +2633,8 @@ else
 
     -- Persistent saved builds (per character, stored in WTF folder)
     SurrealUI_TalentBuilds = SurrealUI_TalentBuilds or {}
-    if AIO.AddSavedVarChar then
-        AIO.AddSavedVarChar("SurrealUI_TalentBuilds")
+    if SSUI.AddSavedVarChar then
+        SSUI.AddSavedVarChar("SurrealUI_TalentBuilds")
     end
 
     -- Client-side talent string encoder (Wowhead format)
@@ -2694,7 +2731,7 @@ else
             button1 = "Apply",
             button2 = "Cancel",
             OnAccept = function()
-                AIO.Handle("SurrealTalents", "ImportTalents", str)
+                SSUI.Handle("SurrealTalents", "ImportTalents", str)
             end,
             timeout = 0,
             whileDead = false,
