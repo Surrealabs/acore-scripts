@@ -543,6 +543,19 @@ else
     local lastClassId, lastSpecIndex
     local ignoreSlotEvents = false
     local pendingSpecCheck = nil
+    -- True only once Handlers.ReceiveLoadout has actually delivered the
+    -- real, server/DB-authoritative loadout for the CURRENT session. A
+    -- ReloadUI (whether from a single or a back-to-back "double" reload
+    -- triggered by an ALE script reload) re-runs this whole file from
+    -- scratch, resetting all of these upvalues to nil/false again -- so
+    -- any auto-save path (ACTIONBAR_SLOT_CHANGED, newly-learned-talent
+    -- auto-fill, etc.) must wait for this flag before it's ever safe to
+    -- push CurrentSlots() to the server. Without this gate, a stray
+    -- ACTIONBAR_SLOT_CHANGED firing while the real RequestLoadout round
+    -- trip is still in flight (or while Blizzard's own UI is still
+    -- settling from the reload) can save transient/placeholder bar
+    -- content and clobber the player's real saved loadout in the DB.
+    local hasReceivedAuthoritativeLoadout = false
 
     local function CurrentSlots()
         local slots = {}
@@ -617,6 +630,7 @@ else
         ApplySlots(slots or {})
         RefreshProcs()
         SaveCachedLoadout(classId, specIndex, slots or {})
+        hasReceivedAuthoritativeLoadout = true
     end
 
     local function RequestLoadoutFor(classId, specIndex)
@@ -686,7 +700,7 @@ else
         end
         ignoreSlotEvents = false
 
-        if changed then
+        if changed and hasReceivedAuthoritativeLoadout then
             SSUI.Handle("SurrealActionBar", "SaveLoadout", lastClassId, lastSpecIndex, CurrentSlots())
             RefreshProcs()
         end
@@ -833,7 +847,7 @@ else
         if event == "ACTIONBAR_SLOT_CHANGED" then
             local slot = arg1
             if not ignoreSlotEvents and slot and slot >= 1 and slot <= SLOT_COUNT
-               and lastClassId and lastSpecIndex then
+               and lastClassId and lastSpecIndex and hasReceivedAuthoritativeLoadout then
                 SSUI.Handle("SurrealActionBar", "SaveLoadout", lastClassId, lastSpecIndex, CurrentSlots())
             end
             procsDirty = true
