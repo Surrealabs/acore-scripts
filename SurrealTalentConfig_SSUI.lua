@@ -668,7 +668,6 @@ SURREAL_TALENT_TREES = {
                     [2277] = {row=4, col=1, maxRank=1, spells={20484}},
                     [2278] = {row=4, col=2, maxRank=1, spells={22812}},
                     [2274] = {row=4, col=3, maxRank=1, spells={1126}},
-                    [2279] = {row=5, col=2, maxRank=1, spells={9821}},
                 },  -- talents
             },  -- Astral
             [2] = {
@@ -678,13 +677,13 @@ SURREAL_TALENT_TREES = {
                 talents = {
                     [2276] = {row=1, col=2, maxRank=1, spells={770}},
                     [2270] = {row=1, col=6, maxRank=1, spells={768}, mastery=true},
+                    [2279] = {row=1, col=12, maxRank=1, spells={9821}},
                     [2280] = {row=2, col=2, maxRank=1, spells={33786}},
                     [2273] = {row=3, col=2, maxRank=1, spells={339}},
                     [2275] = {row=3, col=3, maxRank=1, spells={467}},
                     [2277] = {row=4, col=1, maxRank=1, spells={20484}},
                     [2278] = {row=4, col=2, maxRank=1, spells={22812}},
                     [2274] = {row=4, col=3, maxRank=1, spells={1126}},
-                    [2279] = {row=5, col=2, maxRank=1, spells={9821}},
                 },  -- talents
             },  -- Feline
             [3] = {
@@ -694,13 +693,13 @@ SURREAL_TALENT_TREES = {
                 talents = {
                     [2276] = {row=1, col=2, maxRank=1, spells={770}},
                     [2271] = {row=1, col=5, maxRank=1, spells={33891}, mastery=true},
+                    [2281] = {row=1, col=12, maxRank=1, spells={18562}},
                     [2280] = {row=2, col=2, maxRank=1, spells={33786}},
                     [2273] = {row=3, col=2, maxRank=1, spells={339}},
                     [2275] = {row=3, col=3, maxRank=1, spells={467}},
                     [2277] = {row=4, col=1, maxRank=1, spells={20484}},
                     [2278] = {row=4, col=2, maxRank=1, spells={22812}},
                     [2274] = {row=4, col=3, maxRank=1, spells={1126}},
-                    [2279] = {row=5, col=2, maxRank=1, spells={9821}},
                 },  -- talents
             },  -- Ancient
             [4] = {
@@ -716,7 +715,6 @@ SURREAL_TALENT_TREES = {
                     [2277] = {row=4, col=1, maxRank=1, spells={20484}},
                     [2278] = {row=4, col=2, maxRank=1, spells={22812}},
                     [2274] = {row=4, col=3, maxRank=1, spells={1126}},
-                    [2279] = {row=5, col=2, maxRank=1, spells={9821}},
                 },  -- talents
             },  -- Bear
         },  -- tabs
